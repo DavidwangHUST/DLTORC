@@ -1115,13 +1115,19 @@ inline void setGas(UserData data,
   	gas->setPressure(P(gridPoint));
 }
 
-inline void setGasToUnity(UserData data, double temperature,
+void setGasToUnity(UserData data, double temperature,
                           double pressure,double* YArrayPtr){
     gas->setTemperature(temperature);
     gas->setPressure(pressure);
-    gas->setMassFractions_NoNorm(YArrayPtr);
+    gas->setMassFractions(YArrayPtr);
 }
 
+void setGasToUnityMole(UserData data, double temperature,
+                          double pressure,double* XArrayPtr){
+    gas->setTemperature(temperature);
+    gas->setPressure(pressure);
+    gas->setMoleFractions(XArrayPtr);
+}
 // inline void setGas(UserData data, 
 // 	    double *ydata, 
 // 	    size_t gridPoint,
@@ -1309,7 +1315,7 @@ void getInterfaceTransport(UserData data,
 // Compute transport properties and species diffusive fluxes at the gas-side of the interface
 // using an explicit interface state (TLeft, YLeft) and the first gas-cell state (TRight, YRight).
 // All fluxes are returned per unit area, units of kg/(m^2*s).
-static inline void getInterfaceTransportWithState(UserData data,
+void getInterfaceTransportWithState(UserData data,
 				 const double TLeft,
 				 const double TRight,
 				 const double P,
@@ -1351,225 +1357,208 @@ static inline void getInterfaceTransportWithState(UserData data,
 	trmix->getSpeciesFluxes(1, &gradT, nsp, gradX, nsp, YV);
 }
 
-// Context for multi-variable interface solve enforcing non-penetration constraints (fuel only crosses)
-struct InterfaceNPContext {
-	UserData data;
-	size_t nsp;
-	size_t fuelIndex; // 1-based index
-	double P;
-	// geometry/neighboring states
-	double interface_R;
-	double right_R;
-	double left_R;
-	double left_T;
-	double right_T;
-	std::vector<size_t> nonFuelIdx; // 0-based species indices in x ordering
-	std::vector<double> YRight;     // Y at first gas cell
-	std::vector<double> MW;         // molecular weights
-};
-
 // Residual for the nonlinear system with unknowns: x[0]=T_interface; x[1..]=Y_nonfuel at interface
 // Equations:
 // - For each non-fuel species i: J_i + Y_i * m" = 0 (non-penetration)
 // - Vapor-pressure equilibrium: X_fuel - Psat(T)/P = 0; with Y_fuel = 1 - sum(nonFuel)
-static int interface_np_f(const gsl_vector* x, void* params, gsl_vector* f){
-	InterfaceNPContext* ctx = static_cast<InterfaceNPContext*>(params);
-	UserData data = ctx->data;
-	const size_t nsp = ctx->nsp;
-	const size_t fuelII = ctx->fuelIndex; // 1-based
+// static int interface_np_f(const gsl_vector* x, void* params, gsl_vector* f){
+// 	InterfaceNPContext* ctx = static_cast<InterfaceNPContext*>(params);
+// 	UserData data = ctx->data;
+// 	const size_t nsp = ctx->nsp;
+// 	const size_t fuelII = ctx->fuelIndex; // 1-based
 
-	// Unpack unknowns
-	const double T_int = gsl_vector_get(x, 0);
-	const double mdot_area = gsl_vector_get(x, 1); // kg/(m^2*s)
-	std::vector<double> Yint(nsp, 0.0);
-	double sumNonFuel = 0.0;
-	for(size_t j=0;j<ctx->nonFuelIdx.size();j++){
-		double val = gsl_vector_get(x, 2 + j);
-		if(val < 0.0) val = 0.0;
-		Yint[ ctx->nonFuelIdx[j] ] = val;
-		sumNonFuel += val;
-	}
-	// Fuel mass fraction by closure
-	const size_t fuel0 = fuelII - 1;
-	double Yfuel = ONE - sumNonFuel;
-	if(Yfuel < 0.0) Yfuel = 0.0;
-	if(Yfuel > 1.0) Yfuel = 1.0;
-	Yint[fuel0] = Yfuel;
+// 	// Unpack unknowns
+// 	const double T_int = gsl_vector_get(x, 0);
+// 	const double mdot_area = gsl_vector_get(x, 1); // kg/(m^2*s)
+// 	std::vector<double> Yint(nsp, 0.0);
+// 	double sumNonFuel = 0.0;
+// 	for(size_t j=0;j<ctx->nonFuelIdx.size();j++){
+// 		double val = gsl_vector_get(x, 2 + j);
+// 		if(val < 0.0) val = 0.0;
+// 		Yint[ ctx->nonFuelIdx[j] ] = val;
+// 		sumNonFuel += val;
+// 	}
+// 	// Fuel mass fraction by closure
+// 	const size_t fuel0 = fuelII - 1;
+// 	double Yfuel = ONE - sumNonFuel;
+// 	if(Yfuel < 0.0) Yfuel = 0.0;
+// 	if(Yfuel > 1.0) Yfuel = 1.0;
+// 	Yint[fuel0] = Yfuel;
 
-	// Transport and diffusive fluxes on the gas side of the interface
-	double rho_g, lambda_g;
-	std::vector<double> YV(nsp,0.0);
-	const double deltaR_g = std::max(ctx->right_R - ctx->interface_R, 1e-12);
-	getInterfaceTransportWithState(data,
-		T_int, ctx->right_T, ctx->P,
-		&Yint[0], &ctx->YRight[0], deltaR_g,
-		&rho_g, &lambda_g, &YV[0]);
+// 	// Transport and diffusive fluxes on the gas side of the interface
+// 	double rho_g, lambda_g;
+// 	std::vector<double> YV(nsp,0.0);
+// 	const double deltaR_g = std::max(ctx->right_R - ctx->interface_R, 1e-12);
+// 	getInterfaceTransportWithState(data,
+// 		T_int, ctx->right_T, ctx->P,
+// 		&Yint[0], &ctx->YRight[0], deltaR_g,
+// 		&rho_g, &lambda_g, &YV[0]);
 
-	// Non-penetration residuals for all non-fuel species
-	size_t eq_idx = 0;
-	for(size_t j=0;j<ctx->nonFuelIdx.size();j++){
-		const size_t k0 = ctx->nonFuelIdx[j];
-		const double res_np = YV[k0] + Yint[k0]*mdot_area;
-		gsl_vector_set(f, eq_idx++, res_np);
-	}
+// 	// Non-penetration residuals for all non-fuel species
+// 	size_t eq_idx = 0;
+// 	for(size_t j=0;j<ctx->nonFuelIdx.size();j++){
+// 		const size_t k0 = ctx->nonFuelIdx[j];
+// 		const double res_np = YV[k0] + Yint[k0]*mdot_area;
+// 		gsl_vector_set(f, eq_idx++, res_np);
+// 	}
 
-	// Vapor-pressure equilibrium residual in mole fraction
-	double denom_x = 0.0;
-	for(size_t k=0;k<nsp;k++) denom_x += Yint[k]/ctx->MW[k];
-	denom_x = std::max(denom_x, 1e-300);
-	double Xfuel = (Yfuel/ctx->MW[fuel0]) / denom_x;
-	const double Xfuel_eq = heptaneVaporPressure(T_int)/ctx->P;
-	const double res_vp = Xfuel - Xfuel_eq;
-	gsl_vector_set(f, eq_idx++, res_vp);
+// 	// Vapor-pressure equilibrium residual in mole fraction
+// 	double denom_x = 0.0;
+// 	for(size_t k=0;k<nsp;k++) denom_x += Yint[k]/ctx->MW[k];
+// 	denom_x = std::max(denom_x, 1e-300);
+// 	double Xfuel = (Yfuel/ctx->MW[fuel0]) / denom_x;
+// 	const double Xfuel_eq = heptaneVaporPressure(T_int)/ctx->P;
+// 	const double res_vp = Xfuel - Xfuel_eq;
+// 	gsl_vector_set(f, eq_idx++, res_vp);
 
-	// Energy conservation across interface: q_l - q_g - m" * L = 0
-	const double deltaR_l = std::max(ctx->interface_R - ctx->left_R, 1e-12);
-	singleLiquidFuel->setLiquidState(T_int, ctx->P);
-	const double lambda_l = singleLiquidFuel->calculateThermalConductivity();
-	const double q_l = lambda_l * (T_int - ctx->left_T) / deltaR_l; // W/m^2
-	const double q_g = lambda_g * (ctx->right_T - T_int) / deltaR_g; // W/m^2
-	const double L = heptaneLatentHeat(T_int); // J/kg
-	const double res_energy = q_l - q_g - mdot_area * L;
-	gsl_vector_set(f, eq_idx++, res_energy);
+// 	// Energy conservation across interface: q_l - q_g - m" * L = 0
+// 	const double deltaR_l = std::max(ctx->interface_R - ctx->left_R, 1e-12);
+// 	singleLiquidFuel->setLiquidState(T_int, ctx->P);
+// 	const double lambda_l = singleLiquidFuel->calculateThermalConductivity();
+// 	const double q_l = lambda_l * (T_int - ctx->left_T) / deltaR_l; // W/m^2
+// 	const double q_g = lambda_g * (ctx->right_T - T_int) / deltaR_g; // W/m^2
+// 	const double L = heptaneLatentHeat(T_int); // J/kg
+// 	const double res_energy = q_l - q_g - mdot_area * L;
+// 	gsl_vector_set(f, eq_idx++, res_energy);
 
-	// Optional debug prints: set env DEBUG_IFACE=1 to enable
-	static int dbg = -1;
-	if (dbg < 0) {
-		const char* v = std::getenv("DEBUG_IFACE");
-		dbg = (v && v[0] != '\0') ? 1 : 0;
-	}
-	if (dbg) {
-		printf("[interface_np_f] T_int=%.6e, mdot_area=%.6e, deltaR_g=%.6e, deltaR_l=%.6e\n",
-			T_int, mdot_area, deltaR_g, deltaR_l);
-		for (size_t j = 0; j < ctx->nonFuelIdx.size(); j++) {
-			const size_t k0 = ctx->nonFuelIdx[j];
-			const double res_np = YV[k0] + Yint[k0]*mdot_area;
-			printf("  res_np[%zu](%s) = %.6e  (YV=%.6e, Y=%.6e)\n",
-				k0+1, gas->speciesName(k0).c_str(), res_np, YV[k0], Yint[k0]);
-		}
-		printf("  res_vp = %.6e  (Xfuel=%.6e, Xeq=%.6e)\n", res_vp, Xfuel, Xfuel_eq);
-		printf("  res_energy = %.6e  (q_l=%.6e, q_g=%.6e, L=%.6e)\n",
-			res_energy, q_l, q_g, L);
-	}
+// 	// Optional debug prints: set env DEBUG_IFACE=1 to enable
+// 	static int dbg = -1;
+// 	if (dbg < 0) {
+// 		const char* v = std::getenv("DEBUG_IFACE");
+// 		dbg = (v && v[0] != '\0') ? 1 : 0;
+// 	}
+// 	if (dbg) {
+// 		printf("[interface_np_f] T_int=%.6e, mdot_area=%.6e, deltaR_g=%.6e, deltaR_l=%.6e\n",
+// 			T_int, mdot_area, deltaR_g, deltaR_l);
+// 		for (size_t j = 0; j < ctx->nonFuelIdx.size(); j++) {
+// 			const size_t k0 = ctx->nonFuelIdx[j];
+// 			const double res_np = YV[k0] + Yint[k0]*mdot_area;
+// 			printf("  res_np[%zu](%s) = %.6e  (YV=%.6e, Y=%.6e)\n",
+// 				k0+1, gas->speciesName(k0).c_str(), res_np, YV[k0], Yint[k0]);
+// 		}
+// 		printf("  res_vp = %.6e  (Xfuel=%.6e, Xeq=%.6e)\n", res_vp, Xfuel, Xfuel_eq);
+// 		printf("  res_energy = %.6e  (q_l=%.6e, q_g=%.6e, L=%.6e)\n",
+// 			res_energy, q_l, q_g, L);
+// 	}
 
-	return GSL_SUCCESS;
-}
+// 	return GSL_SUCCESS;
+// }
 
 // Solve interface (non-penetration for non-fuel, VLE for fuel) and update interface state
-static int solveInterfaceNonPenetration(UserData data, double* ydata,double delta_t){
-	const size_t nsp = data->nsp;
-	const size_t nlpts = data->nlpts;
-	const size_t fuelII = data->dropII; // 1-based
-	const double P = data->initialPressure * Cantera::OneAtm;
+// static int solveInterfaceNonPenetration(UserData data, double* ydata,double delta_t){
+// 	const size_t nsp = data->nsp;
+// 	const size_t nlpts = data->nlpts;
+// 	const size_t fuelII = data->dropII; // 1-based
+// 	const double P = data->initialPressure * Cantera::OneAtm;
 
-	InterfaceNPContext ctx;
-	ctx.data = data;
-	ctx.nsp = nsp;
-	ctx.fuelIndex = fuelII;
-	ctx.P = P;
-	ctx.interface_R = data->interfaceGasCellArr[0];
-	ctx.right_R = R(nlpts+1);
-	if(nlpts > 1){
-		ctx.left_R = R(nlpts);
-	}else{
-		ctx.left_R = std::max(data->interfaceGasCellArr[0] - (data->interfaceGasCellArr[0]-data->interfaceGasCellArr[1]), 0.0);
-	}
-	ctx.left_T = T(nlpts);
-	ctx.right_T = T(nlpts+1);
-	ctx.YRight.assign(nsp, 0.0);
-	for(size_t k=0;k<nsp;k++) ctx.YRight[k] = Y(nlpts+1, k+1);
-	ctx.MW.assign(nsp, 0.0);
-	for(size_t k=0;k<nsp;k++) ctx.MW[k] = gas->molecularWeight(k);
-	ctx.nonFuelIdx.clear();
-	for(size_t k0=0;k0<nsp;k0++) if((k0+1) != fuelII) ctx.nonFuelIdx.push_back(k0); // 0-based
+// 	InterfaceNPContext ctx;
+// 	ctx.data = data;
+// 	ctx.nsp = nsp;
+// 	ctx.fuelIndex = fuelII;
+// 	ctx.P = P;
+// 	ctx.interface_R = data->interfaceGasCellArr[0];
+// 	ctx.right_R = R(nlpts+1);
+// 	if(nlpts > 1){
+// 		ctx.left_R = R(nlpts);
+// 	}else{
+// 		ctx.left_R = std::max(data->interfaceGasCellArr[0] - (data->interfaceGasCellArr[0]-data->interfaceGasCellArr[1]), 0.0);
+// 	}
+// 	ctx.left_T = T(nlpts);
+// 	ctx.right_T = T(nlpts+1);
+// 	ctx.YRight.assign(nsp, 0.0);
+// 	for(size_t k=0;k<nsp;k++) ctx.YRight[k] = Y(nlpts+1, k+1);
+// 	ctx.MW.assign(nsp, 0.0);
+// 	for(size_t k=0;k<nsp;k++) ctx.MW[k] = gas->molecularWeight(k);
+// 	ctx.nonFuelIdx.clear();
+// 	for(size_t k0=0;k0<nsp;k0++) if((k0+1) != fuelII) ctx.nonFuelIdx.push_back(k0); // 0-based
 
-	// Unknowns: [T_interface, mdot_area, Yi_nonfuel...]
-	const size_t nUnknown = 2 + ctx.nonFuelIdx.size();
-	gsl_vector* x = gsl_vector_alloc(nUnknown);
-	gsl_vector_set(x, 0, data->interfaceGasCellArr[1]);
-	// initial guess for Yi from current interface; fallback to right cell
-	double sumNF = 0.0;
-	for(size_t j=0;j<ctx.nonFuelIdx.size();j++){
-		const size_t k0 = ctx.nonFuelIdx[j];
-		double v = data->interfaceGasCellArr[2 + k0];
-		if(!(v==v) || v<0.0){ v = Y(nlpts+1, k0+1); }
-		gsl_vector_set(x, 2+j, v);
-		sumNF += v;
-	}
-	if(sumNF <= 0.0){
-		for(size_t j=0;j<ctx.nonFuelIdx.size();j++){
-			const size_t k0 = ctx.nonFuelIdx[j];
-			gsl_vector_set(x, 2+j, Y(nlpts+1, k0+1));
-		}
-	}
-	// Initial guess for mdot_area from current interface state
-	{
-		std::vector<double> Yint0(nsp,0.0);
-		double sumNF0 = 0.0;
-		for(size_t j=0;j<ctx.nonFuelIdx.size();j++){
-			const size_t k0 = ctx.nonFuelIdx[j];
-			Yint0[k0] = gsl_vector_get(x, 2+j);
-			sumNF0 += Yint0[k0];
-		}
-		const size_t fuel0 = fuelII-1;
-		Yint0[fuel0] = std::max(0.0, 1.0 - sumNF0);
-		double rho_g0, lambda_g0; std::vector<double> YV0(nsp,0.0);
-		const double dRg = std::max(ctx.right_R - ctx.interface_R, 1e-12);
-		getInterfaceTransportWithState(data,
-			data->interfaceGasCellArr[1], ctx.right_T, P,
-			&Yint0[0], &ctx.YRight[0], dRg,
-			&rho_g0, &lambda_g0, &YV0[0]);
-		const double denom = std::max(1.0 - Yint0[fuel0], 1e-12);
-		gsl_vector_set(x, 1, YV0[fuel0]/denom);
-	}
+// 	// Unknowns: [T_interface, mdot_area, Yi_nonfuel...]
+// 	const size_t nUnknown = 2 + ctx.nonFuelIdx.size();
+// 	gsl_vector* x = gsl_vector_alloc(nUnknown);
+// 	gsl_vector_set(x, 0, data->interfaceGasCellArr[1]);
+// 	// initial guess for Yi from current interface; fallback to right cell
+// 	double sumNF = 0.0;
+// 	for(size_t j=0;j<ctx.nonFuelIdx.size();j++){
+// 		const size_t k0 = ctx.nonFuelIdx[j];
+// 		double v = data->interfaceGasCellArr[2 + k0];
+// 		if(!(v==v) || v<0.0){ v = Y(nlpts+1, k0+1); }
+// 		gsl_vector_set(x, 2+j, v);
+// 		sumNF += v;
+// 	}
+// 	if(sumNF <= 0.0){
+// 		for(size_t j=0;j<ctx.nonFuelIdx.size();j++){
+// 			const size_t k0 = ctx.nonFuelIdx[j];
+// 			gsl_vector_set(x, 2+j, Y(nlpts+1, k0+1));
+// 		}
+// 	}
+// 	// Initial guess for mdot_area from current interface state
+// 	{
+// 		std::vector<double> Yint0(nsp,0.0);
+// 		double sumNF0 = 0.0;
+// 		for(size_t j=0;j<ctx.nonFuelIdx.size();j++){
+// 			const size_t k0 = ctx.nonFuelIdx[j];
+// 			Yint0[k0] = gsl_vector_get(x, 2+j);
+// 			sumNF0 += Yint0[k0];
+// 		}
+// 		const size_t fuel0 = fuelII-1;
+// 		Yint0[fuel0] = std::max(0.0, 1.0 - sumNF0);
+// 		double rho_g0, lambda_g0; std::vector<double> YV0(nsp,0.0);
+// 		const double dRg = std::max(ctx.right_R - ctx.interface_R, 1e-12);
+// 		getInterfaceTransportWithState(data,
+// 			data->interfaceGasCellArr[1], ctx.right_T, P,
+// 			&Yint0[0], &ctx.YRight[0], dRg,
+// 			&rho_g0, &lambda_g0, &YV0[0]);
+// 		const double denom = std::max(1.0 - Yint0[fuel0], 1e-12);
+// 		gsl_vector_set(x, 1, YV0[fuel0]/denom);
+// 	}
 
-	const gsl_multiroot_fsolver_type* Tsolver = gsl_multiroot_fsolver_hybrids;
-	gsl_multiroot_fsolver* solver = gsl_multiroot_fsolver_alloc(Tsolver, nUnknown);
-	gsl_multiroot_function F;
-	F.f = &interface_np_f;
-	F.n = nUnknown; // (nsp-1 non-fuel) + vapor pressure + energy
-	F.params = &ctx;
-	gsl_multiroot_fsolver_set(solver, &F, x);
+// 	const gsl_multiroot_fsolver_type* Tsolver = gsl_multiroot_fsolver_hybrids;
+// 	gsl_multiroot_fsolver* solver = gsl_multiroot_fsolver_alloc(Tsolver, nUnknown);
+// 	gsl_multiroot_function F;
+// 	F.f = &interface_np_f;
+// 	F.n = nUnknown; // (nsp-1 non-fuel) + vapor pressure + energy
+// 	F.params = &ctx;
+// 	gsl_multiroot_fsolver_set(solver, &F, x);
 
-	int status = GSL_CONTINUE;
-	size_t iter = 0; const size_t max_iter = 100;
-	while (status == GSL_CONTINUE && iter < max_iter){
-		iter++;
-		status = gsl_multiroot_fsolver_iterate(solver);
-		if(status) break;
-		status = gsl_multiroot_test_residual(solver->f, 1e-9);
-	}
+// 	int status = GSL_CONTINUE;
+// 	size_t iter = 0; const size_t max_iter = 100;
+// 	while (status == GSL_CONTINUE && iter < max_iter){
+// 		iter++;
+// 		status = gsl_multiroot_fsolver_iterate(solver);
+// 		if(status) break;
+// 		status = gsl_multiroot_test_residual(solver->f, 1e-9);
+// 	}
 
-	if(status != GSL_SUCCESS){
-		gsl_multiroot_fsolver_free(solver);
-		gsl_vector_free(x);
-		return -1;
-	}
+// 	if(status != GSL_SUCCESS){
+// 		gsl_multiroot_fsolver_free(solver);
+// 		gsl_vector_free(x);
+// 		return -1;
+// 	}
 
-	// Extract solution
-	gsl_vector* xsol = solver->x;
-	const double T_int = gsl_vector_get(xsol, 0);
-	std::vector<double> Yint(nsp, 0.0);
-	double sumNonFuelSol = 0.0;
-	for(size_t j=0;j<ctx.nonFuelIdx.size();j++){
-		double v = gsl_vector_get(xsol, 2+j);
-		if(v < 0.0) v = 0.0;
-		Yint[ ctx.nonFuelIdx[j] ] = v;
-		sumNonFuelSol += v;
-	}
-	Yint[fuelII-1] = std::max(0.0, 1.0 - sumNonFuelSol);
+// 	// Extract solution
+// 	gsl_vector* xsol = solver->x;
+// 	const double T_int = gsl_vector_get(xsol, 0);
+// 	std::vector<double> Yint(nsp, 0.0);
+// 	double sumNonFuelSol = 0.0;
+// 	for(size_t j=0;j<ctx.nonFuelIdx.size();j++){
+// 		double v = gsl_vector_get(xsol, 2+j);
+// 		if(v < 0.0) v = 0.0;
+// 		Yint[ ctx.nonFuelIdx[j] ] = v;
+// 		sumNonFuelSol += v;
+// 	}
+// 	Yint[fuelII-1] = std::max(0.0, 1.0 - sumNonFuelSol);
 
-	// Update interface arrays: sequence R, T, Ys, P
-	data->interfaceGasCellArr[1] = T_int;
-	for(size_t k0=0;k0<nsp;k0++) data->interfaceGasCellArr[2+k0] = Yint[k0];
+// 	// Update interface arrays: sequence R, T, Ys, P
+// 	data->interfaceGasCellArr[1] = T_int;
+// 	for(size_t k0=0;k0<nsp;k0++) data->interfaceGasCellArr[2+k0] = Yint[k0];
 
-    double mdot_area = gsl_vector_get(xsol, 1) * calc_area(ctx.interface_R, &data->metric); // kg/s
-    data->dropletMass -= (mdot_area) * delta_t;
+//     double mdot_area = gsl_vector_get(xsol, 1) * calc_area(ctx.interface_R, &data->metric); // kg/s
+//     data->dropletMass -= (mdot_area) * delta_t;
 
-	gsl_multiroot_fsolver_free(solver);
-	gsl_vector_free(x);
-	return 0;
-}
+// 	gsl_multiroot_fsolver_free(solver);
+// 	gsl_vector_free(x);
+// 	return 0;
+// }
 
 // void getTransport(UserData data, 
 // 		  double *ydata, 
@@ -2278,7 +2267,7 @@ int funNew(double t,
     areahalf[0] = calc_area(HALF*(gasR(1)+gasR(2)),&m);
     areahalfsq[0] = areahalf[0]*areahalf[0];
 
-#pragma omp parallel for default(none) shared(rhohalf,lambdahalf,YVhalf,areahalf,nlpts, npts,areahalfsq,data,ydata,m)
+#pragma omp parallel for schedule(static) default(none) shared(rhohalf,lambdahalf,YVhalf,areahalf,nlpts, npts,areahalfsq,data,ydata,m)
     for (size_t j = nlpts+1;j<nlpts+npts;j++){
         size_t gasII = j- nlpts +1 ; // gasII begin with 2
         areahalf[gasII-1] = calc_area(HALF*(gasR(gasII)+ gasR(gasII+1)),&m);
@@ -2351,7 +2340,7 @@ int funNew(double t,
         double dpsip, dpsiav, dpsipm, dpsim, dpsimm;
         dpsip=dpsiav=dpsipm=dpsim=dpsimm=ONE;
 
-#pragma omp for
+#pragma omp for schedule(static)
         /*Fill up res with governing equations at inner points:*************/
         for (size_t j = 1+nlpts; j < nlpts+npts; j++) {
 
@@ -2388,7 +2377,7 @@ int funNew(double t,
             Cvb=gas->cv_mass();       	//J/kg/K
             // data->gas->getNetProductionRates(wdot); //kmol/m^3
 
-            if (data->rxn == 0){
+            if (data->rxn == 0 || gasR(gasII) > (data->Rd + 0.95 * data->domainLength)){
                 for (size_t k = 1; k <= nsp; k++)
                 {
                     wdot(k) = 0.0;
@@ -2515,9 +2504,7 @@ int funNew(double t,
                           - advTerm
                           + diffTerm
                           - srcTerm;
-                if (!data->dirichletOuter) {//Neumann temperature outer BC
-                    Tdot(j + 1) = Tdot(j);
-                }
+                // Neumann temperature outer BC handled after the parallel loop
             } else {
                 sum = ZERO;
                 sum1 = ZERO;
@@ -2697,6 +2684,11 @@ int funNew(double t,
 
     }
 
+    // Apply outer gas boundary condition once, outside the parallel region
+    if (!data->dirichletOuter) {
+        Tdot(nlpts + npts) = Tdot(nlpts + npts - 1);
+    }
+
     /*******************************************************************///
 
 
@@ -2742,7 +2734,7 @@ int funNew(double t,
     // flux variables of nlpts-1
     double rhoLiquidhalf[nlpts-1],lambdaLiquidhalf[nlpts-1],areaLiquidhalf[nlpts-1],areaLiquidhalfsq[nlpts-1];
 
-#pragma omp parallel for default(none) shared(rhoLiquidhalf,lambdaLiquidhalf,areaLiquidhalf,areaLiquidhalfsq,nlpts,data,ydata,m)
+#pragma omp parallel for schedule(static) default(none) shared(rhoLiquidhalf,lambdaLiquidhalf,areaLiquidhalf,areaLiquidhalfsq,nlpts,data,ydata,m)
     for (size_t j = 1; j <= nlpts - 1; j++) {
         areaLiquidhalf[j - 1] = calc_area(HALF * (liquidR(j) + liquidR(j + 1)), &m);
         areaLiquidhalfsq[j - 1] = areaLiquidhalf[j - 1] * areaLiquidhalf[j - 1];
@@ -2776,7 +2768,7 @@ int funNew(double t,
         double detap, detaav, detapm, detam, detamm;
         detap=detaav=detapm=detam=detamm=ONE;
 
-#pragma omp for
+#pragma omp for schedule(static)
     for(size_t j =2;j<= (nlpts-1);j++){ // handle inner grid points
         detam = std::abs(eta(j)- eta(j-1));
         detap = std::abs(eta(j+1) - eta(j));
@@ -2797,15 +2789,10 @@ int funNew(double t,
 
 
         if (j==2) {
-            Pdot(j-1) = Pdot(j);
-            for (size_t k = 1;k <= nsp;k++){
-                Ydot(j-1,k) = Ydot(j,k);
-            }
 //            advTerm = ZERO; // neumann B.C. at droplet center
             diffTerm = 1/ (Cpb * dropletMass * dropletMass) *
                        (rhoLiquidhalf[j-1] * areaLiquidhalfsq[j-1] * lambdaLiquidhalf[j-1] * (T(j + 1) - T(j)) / detap) / detaav;
             Tdot(j) = diffTerm ;
-            Tdot(j-1) = Tdot(j) ;
         }else{
             advTerm = eta(j) * (-Mdot) / dropletMass * (T(j)-T(j-1)) / detam;
             diffTerm = 1.0 / (Cpb * dropletMass*dropletMass) *
@@ -2822,6 +2809,13 @@ int funNew(double t,
 //        rho = rhop;
 //        rhomhalf = rhophalf;
     }
+
+    // Apply liquid center boundary condition once, outside the parallel region
+    Pdot(1) = Pdot(2);
+    for (size_t k = 1; k <= nsp; k++) {
+        Ydot(1, k) = Ydot(2, k);
+    }
+    Tdot(1) = Tdot(2);
 
     {    // last internal point handling
         double detam,detap,detaav,
@@ -3344,6 +3338,8 @@ void getRNew(double* ydata, UserData data){
     // update both interface cell array's R
     data->interfaceGasCellArr[0] = data->Rd;
     data->interfaceLiquidCellArr[0] = data->Rd;
+
+//    printf("droplet radius :%.3e [m] \n",data->Rd) ;
 
     // second step:we update the gas phase R array
 //    R(1) = data->Rd;
@@ -3901,64 +3897,64 @@ void updateInterfaceMassFracArray(double temperature, double PAmbience, double* 
     }
 }
 
-double interfaceIterationResidue(double x, void* params) {
-    auto* parameters = static_cast<interfaceProblemPara>(params);
-    double factor = 1.0 ;
+// double interfaceIterationResidue(double x, void* params) {
+//     auto* parameters = static_cast<interfaceProblemPara>(params);
+//     double factor = 1.0 ;
 
-    // Extract parameters for clarity
-//    const double latentHeat = 316887; // Unit: J/kg
-//    const double latentHeat = octaneLatentHeat(x) *0.9 ; // units: J/kg
-    const double latentHeat = heptaneLatentHeat(x) ; // units: J/kg
-    const double lambdaGas = parameters->lambda_gas; // Unit: kg·m/s³·K (W/m/K)
-    const double lambdaLiquid = parameters->lambda_liquid;
-    const double leftR = parameters->left_R;
-    const double rightR = parameters->right_R;
-    const double dropletRadius = parameters->interface_R;
-    const double leftT = parameters->left_T;
-    const double rightT = parameters->right_T;
-    const double D = parameters->gasDiffCoeff;
-    const double rhoGas = parameters->gasDensity;
-    double YV[parameters->nsp] ;
-    double deltaR_R = rightR -  dropletRadius;
+//     // Extract parameters for clarity
+// //    const double latentHeat = 316887; // Unit: J/kg
+// //    const double latentHeat = octaneLatentHeat(x) *0.9 ; // units: J/kg
+//     const double latentHeat = heptaneLatentHeat(x) ; // units: J/kg
+//     const double lambdaGas = parameters->lambda_gas; // Unit: kg·m/s³·K (W/m/K)
+//     const double lambdaLiquid = parameters->lambda_liquid;
+//     const double leftR = parameters->left_R;
+//     const double rightR = parameters->right_R;
+//     const double dropletRadius = parameters->interface_R;
+//     const double leftT = parameters->left_T;
+//     const double rightT = parameters->right_T;
+//     const double D = parameters->gasDiffCoeff;
+//     const double rhoGas = parameters->gasDensity;
+//     double YV[parameters->nsp] ;
+//     double deltaR_R = rightR -  dropletRadius;
 
-    std::vector<double> x1 = {parameters->left_R1,parameters->left_R,parameters->interface_R};
-    std::vector<double> x2 = {parameters->interface_R,parameters->right_R,parameters->right_R1};
-    std::vector<double> y1 = {parameters->left_T1,parameters->left_T,x};
-    std::vector<double> y2 = {x,parameters->right_T,parameters->right_T1};
+//     std::vector<double> x1 = {parameters->left_R1,parameters->left_R,parameters->interface_R};
+//     std::vector<double> x2 = {parameters->interface_R,parameters->right_R,parameters->right_R1};
+//     std::vector<double> y1 = {parameters->left_T1,parameters->left_T,x};
+//     std::vector<double> y2 = {x,parameters->right_T,parameters->right_T1};
 
-    double gradT_l = computeDerivative(x1,y1,dropletRadius);
-    double gradT_g = computeDerivative(x2,y2,dropletRadius);
+//     double gradT_l = computeDerivative(x1,y1,dropletRadius);
+//     double gradT_g = computeDerivative(x2,y2,dropletRadius);
 
-    double YArrayInterfaceNew[parameters->nsp];
-    updateInterfaceMassFracArray(
-            x, parameters->P, parameters->YArray_Right, YArrayInterfaceNew,
-            parameters->MWArray, parameters->nsp, parameters->fuelIndex
-    );
+//     double YArrayInterfaceNew[parameters->nsp];
+//     updateInterfaceMassFracArray(
+//             x, parameters->P, parameters->YArray_Right, YArrayInterfaceNew,
+//             parameters->MWArray, parameters->nsp, parameters->fuelIndex
+//     );
 
-    getInterfaceMassFlux(leftT,rightT,parameters->P,YArrayInterfaceNew,parameters->YArray_Right,deltaR_R,YV) ;
+//     getInterfaceMassFlux(leftT,rightT,parameters->P,YArrayInterfaceNew,parameters->YArray_Right,deltaR_R,YV) ;
 
-    // Calculate mdot and associated terms
-    const double YInterfaceFuel = YArrayInterfaceNew[parameters->fuelIndex - 1];
-    const double YRightFuel = parameters->YArray_Right[parameters->fuelIndex - 1];
-    const double mdot = rhoGas * (-D) * (YRightFuel - YInterfaceFuel) / (rightR - dropletRadius) /
-            (1 - HALF*(YInterfaceFuel+YRightFuel)); // mdot here is the flux
-//    const double mdot = YV[parameters->fuelIndex - 1]/ (rightR - dropletRadius) /
-//            (1 - HALF*(YInterfaceFuel+YRightFuel )); // mdot here is the flux
-//////            (1 - YInterfaceFuel); // mdot here is the flux
+//     // Calculate mdot and associated terms
+//     const double YInterfaceFuel = YArrayInterfaceNew[parameters->fuelIndex - 1];
+//     const double YRightFuel = parameters->YArray_Right[parameters->fuelIndex - 1];
+//     const double mdot = rhoGas * (-D) * (YRightFuel - YInterfaceFuel) / (rightR - dropletRadius) /
+//             (1 - HALF*(YInterfaceFuel+YRightFuel)); // mdot here is the flux
+// //    const double mdot = YV[parameters->fuelIndex - 1]/ (rightR - dropletRadius) /
+// //            (1 - HALF*(YInterfaceFuel+YRightFuel )); // mdot here is the flux
+// //////            (1 - YInterfaceFuel); // mdot here is the flux
 
-    const double vaporHeatTerm = factor* mdot * latentHeat ; //units: Watt
+//     const double vaporHeatTerm = factor* mdot * latentHeat ; //units: Watt
 
-    // Calculate heat fluxes
-//    const double gasHeatFlux = lambdaGas * (rightT - x) / (rightR - dropletRadius);
-//    const double liquidHeatFlux = lambdaLiquid * (x - leftT) / (dropletRadius - leftR);
-    const double gasHeatFlux = lambdaGas* gradT_g ;
-    const double liquidHeatFlux = lambdaLiquid * gradT_l;
-    const double res = (vaporHeatTerm+liquidHeatFlux-gasHeatFlux) ;
+//     // Calculate heat fluxes
+// //    const double gasHeatFlux = lambdaGas * (rightT - x) / (rightR - dropletRadius);
+// //    const double liquidHeatFlux = lambdaLiquid * (x - leftT) / (dropletRadius - leftR);
+//     const double gasHeatFlux = lambdaGas* gradT_g ;
+//     const double liquidHeatFlux = lambdaLiquid * gradT_l;
+//     const double res = (vaporHeatTerm+liquidHeatFlux-gasHeatFlux) ;
 
-    // Calculate and return the residue
-//    return std::abs(vaporHeatTerm) + std::abs(liquidHeatFlux) - std::abs(gasHeatFlux);
-    return res;
-}
+//     // Calculate and return the residue
+// //    return std::abs(vaporHeatTerm) + std::abs(liquidHeatFlux) - std::abs(gasHeatFlux);
+//     return res;
+// }
 
 
 //void updateInterfaceState(double* ydata, UserData data, double delta_t){
@@ -4077,186 +4073,186 @@ double interfaceIterationResidue(double x, void* params) {
 //}
 
 
-void updateInterfaceState(double* ydata, UserData data, double delta_t) {
-    // Extract reusable parameters
-    size_t nsp = data->nsp;
-    size_t fuelIndex = data->dropII;
-    double P = data->initialPressure * Cantera::OneAtm;
-    double interfaceT = data->interfaceGasCellArr[1];
-    double dropletRadius = interfaceR;
+// void updateInterfaceState(double* ydata, UserData data, double delta_t) {
+//     // Extract reusable parameters
+//     size_t nsp = data->nsp;
+//     size_t fuelIndex = data->dropII;
+//     double P = data->initialPressure * Cantera::OneAtm;
+//     double interfaceT = data->interfaceGasCellArr[1];
+//     double dropletRadius = interfaceR;
 
-    // Liquid and gas phase properties
-    double leftT = T(data->nlpts);
-    double rightT = T(data->nlpts + 1);
-    double leftR = liquidR(data->nlpts);
-    double rightR = gasR(2);
-    double delta_T = 10.00;
+//     // Liquid and gas phase properties
+//     double leftT = T(data->nlpts);
+//     double rightT = T(data->nlpts + 1);
+//     double leftR = liquidR(data->nlpts);
+//     double rightR = gasR(2);
+//     double delta_T = 10.00;
 
-    double T_low = interfaceT ;
-    double T_high = rightT ;
+//     double T_low = interfaceT ;
+//     double T_high = rightT ;
 
-    // Initialize arrays and gas phase properties
-    std::vector<double> MWArray(nsp), interfaceYArray_Old(nsp), gasDiffCoeffs(nsp), YArrayRight(nsp),YArrayAvg(nsp);
-    for (size_t i = 0; i < nsp; ++i) {
-        MWArray[i] = gas->molecularWeight(i);
-        interfaceYArray_Old[i] = data->interfaceGasCellArr[2 + i];
-        if (i < nsp) YArrayRight[i] = Y(data->nlpts + 1, i + 1);
-        YArrayAvg[i] = HALF * (interfaceYArray_Old[i] + YArrayRight[i]);
-    }
-    gas->setState_TPY(HALF*(interfaceT+rightT), P, YArrayAvg.data());
-    double lambdaGas = trmix->thermalConductivity();
-    trmix->getMixDiffCoeffs(gasDiffCoeffs.data());
-    double fuelDiffCoeff = gasDiffCoeffs[fuelIndex - 1];
-    double rhoGas = gas->density();
+//     // Initialize arrays and gas phase properties
+//     std::vector<double> MWArray(nsp), interfaceYArray_Old(nsp), gasDiffCoeffs(nsp), YArrayRight(nsp),YArrayAvg(nsp);
+//     for (size_t i = 0; i < nsp; ++i) {
+//         MWArray[i] = gas->molecularWeight(i);
+//         interfaceYArray_Old[i] = data->interfaceGasCellArr[2 + i];
+//         if (i < nsp) YArrayRight[i] = Y(data->nlpts + 1, i + 1);
+//         YArrayAvg[i] = HALF * (interfaceYArray_Old[i] + YArrayRight[i]);
+//     }
+//     gas->setState_TPY(HALF*(interfaceT+rightT), P, YArrayAvg.data());
+//     double lambdaGas = trmix->thermalConductivity();
+//     trmix->getMixDiffCoeffs(gasDiffCoeffs.data());
+//     double fuelDiffCoeff = gasDiffCoeffs[fuelIndex - 1];
+//     double rhoGas = gas->density();
 
 
-    singleLiquidFuel->setLiquidState(HALF*(interfaceT+leftT), P);
-    double lambdaLiquid = singleLiquidFuel->calculateThermalConductivity();
+//     singleLiquidFuel->setLiquidState(HALF*(interfaceT+leftT), P);
+//     double lambdaLiquid = singleLiquidFuel->calculateThermalConductivity();
 
-    if (data->flagSolveInterfaceProblem) {
-        // New solver: enforce non-penetration for non-fuel species; fuel only crosses
-        if(solveInterfaceNonPenetration(data, ydata,delta_t) == 0){
-            // Keep liquid-side interface temperature consistent
-            data->interfaceLiquidCellArr[1] = data->interfaceGasCellArr[1];
-            return;
-        }
-        // Prepare for interface problem solving
-        interfaceProblemPara nP = new interfaceProblemParameters;
-//        auto nP = std:: <interfaceProblemParameters>();
-        *nP = {nsp, fuelIndex, P, rhoGas, fuelDiffCoeff, lambdaGas, lambdaLiquid,
-               liquidR(data->nlpts-1),leftR, dropletRadius, rightR, gasR(3),leftT, rightT,T(data->nlpts-1), T(data->nlpts + 2),
-               interfaceYArray_Old.data(), YArrayRight.data(), MWArray.data()};
+//     if (data->flagSolveInterfaceProblem) {
+//         // New solver: enforce non-penetration for non-fuel species; fuel only crosses
+//         if(solveInterfaceNonPenetration(data, ydata,delta_t) == 0){
+//             // Keep liquid-side interface temperature consistent
+//             data->interfaceLiquidCellArr[1] = data->interfaceGasCellArr[1];
+//             return;
+//         }
+//         // Prepare for interface problem solving
+//         interfaceProblemPara nP = new interfaceProblemParameters;
+// //        auto nP = std:: <interfaceProblemParameters>();
+//         *nP = {nsp, fuelIndex, P, rhoGas, fuelDiffCoeff, lambdaGas, lambdaLiquid,
+//                liquidR(data->nlpts-1),leftR, dropletRadius, rightR, gasR(3),leftT, rightT,T(data->nlpts-1), T(data->nlpts + 2),
+//                interfaceYArray_Old.data(), YArrayRight.data(), MWArray.data()};
 
-        // GSL root solver
-        gsl_function F = {&interfaceIterationResidue, nP};
-        gsl_root_fsolver* solver = gsl_root_fsolver_alloc(gsl_root_fsolver_brent);
+//         // GSL root solver
+//         gsl_function F = {&interfaceIterationResidue, nP};
+//         gsl_root_fsolver* solver = gsl_root_fsolver_alloc(gsl_root_fsolver_brent);
 
-        // Evaluate the function at the endpoints
-        double f_low = F.function(T_low, F.params);
-        double f_high = F.function(T_high, F.params);
+//         // Evaluate the function at the endpoints
+//         double f_low = F.function(T_low, F.params);
+//         double f_high = F.function(T_high, F.params);
 
-        // DEBUG
-        printf("f_low  = %.6f .\n", f_low) ;
-        printf("f_high = %.6f .\n", f_high) ;
+//         // DEBUG
+//         printf("f_low  = %.6f .\n", f_low) ;
+//         printf("f_high = %.6f .\n", f_high) ;
 
-        // --- NEW: Add checks for NaN and Infinity FIRST ---
-        if (std::isnan(f_low) || std::isinf(f_low) || std::isnan(f_high) || std::isinf(f_high)) {
-            printf("Function evaluated to NaN or Infinity at the boundaries. Cannot solve.\n");
-            printf("f_low: %f, f_high: %f. Retaining old interface state.\n", f_low, f_high);
+//         // --- NEW: Add checks for NaN and Infinity FIRST ---
+//         if (std::isnan(f_low) || std::isinf(f_low) || std::isnan(f_high) || std::isinf(f_high)) {
+//             printf("Function evaluated to NaN or Infinity at the boundaries. Cannot solve.\n");
+//             printf("f_low: %f, f_high: %f. Retaining old interface state.\n", f_low, f_high);
             
-            // Clean up and skip the solver, just like in the other failure cases
-            gsl_root_fsolver_free(solver);
-            delete nP;
+//             // Clean up and skip the solver, just like in the other failure cases
+//             gsl_root_fsolver_free(solver);
+//             delete nP;
 
-            double area = calc_area(dropletRadius, &data->metric);
-            double mdot = rhoGas * (-fuelDiffCoeff) *
-                          (interfaceYArray_Old[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
-                          (rightR - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex - 1]) * area;
-            data->dropletMass -= mdot * delta_t;
+//             double area = calc_area(dropletRadius, &data->metric);
+//             double mdot = rhoGas * (-fuelDiffCoeff) *
+//                           (interfaceYArray_Old[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
+//                           (rightR - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex - 1]) * area;
+//             data->dropletMass -= mdot * delta_t;
 
-            return;
-        }
+//             return;
+//         }
 
-        if (f_low * f_high > 0) {
-            // If the endpoints do not straddle y = 0, retain old data and skip the solver
-            printf("Brent solver endpoints do not straddle y=0. Retaining old interface state.\n");
-            gsl_root_fsolver_free(solver);
-            delete nP;
+//         if (f_low * f_high > 0) {
+//             // If the endpoints do not straddle y = 0, retain old data and skip the solver
+//             printf("Brent solver endpoints do not straddle y=0. Retaining old interface state.\n");
+//             gsl_root_fsolver_free(solver);
+//             delete nP;
 
-            // Skip solving iteration problem
-            double area = calc_area(dropletRadius, &data->metric);
-            double mdot = rhoGas * (-fuelDiffCoeff) *
-                          (interfaceYArray_Old[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
-                          (rightR - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex - 1]) * area;
+//             // Skip solving iteration problem
+//             double area = calc_area(dropletRadius, &data->metric);
+//             double mdot = rhoGas * (-fuelDiffCoeff) *
+//                           (interfaceYArray_Old[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
+//                           (rightR - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex - 1]) * area;
 
-            data->dropletMass -= mdot * delta_t;
+//             data->dropletMass -= mdot * delta_t;
 
-            return;
-        }
+//             return;
+//         }
 
-        // Set up and solve using the Brent solver
-        gsl_root_fsolver_set(solver, &F, T_low, T_high);
-        double root = 0.0;
-        int iter = 0, status;
-        const int max_iter = 20;
+//         // Set up and solve using the Brent solver
+//         gsl_root_fsolver_set(solver, &F, T_low, T_high);
+//         double root = 0.0;
+//         int iter = 0, status;
+//         const int max_iter = 20;
 
-        do {
-            gsl_root_fsolver_iterate(solver);
-            root = gsl_root_fsolver_root(solver);
-            status = gsl_root_test_interval(gsl_root_fsolver_x_lower(solver),
-                                            gsl_root_fsolver_x_upper(solver),
-                                            0, 1e-9);
-        } while (status == GSL_CONTINUE && ++iter < max_iter);
+//         do {
+//             gsl_root_fsolver_iterate(solver);
+//             root = gsl_root_fsolver_root(solver);
+//             status = gsl_root_test_interval(gsl_root_fsolver_x_lower(solver),
+//                                             gsl_root_fsolver_x_upper(solver),
+//                                             0, 1e-9);
+//         } while (status == GSL_CONTINUE && ++iter < max_iter);
 
-        gsl_root_fsolver_free(solver);
+//         gsl_root_fsolver_free(solver);
 
-        // Update based on vapor pressure
-//        double vaporPressure = octaneVaporPressure(root);
-        double vaporPressure = heptaneVaporPressure(root) ;
-        double area = calc_area(dropletRadius, &data->metric);
-        if (vaporPressure <= P) {
-            std::vector<double> interfaceYArray_New(nsp);
-            updateInterfaceMassFracArray(root, P, YArrayRight.data(),
-                                         interfaceYArray_New.data(), MWArray.data(), nsp, fuelIndex);
+//         // Update based on vapor pressure
+// //        double vaporPressure = octaneVaporPressure(root);
+//         double vaporPressure = heptaneVaporPressure(root) ;
+//         double area = calc_area(dropletRadius, &data->metric);
+//         if (vaporPressure <= P) {
+//             std::vector<double> interfaceYArray_New(nsp);
+//             updateInterfaceMassFracArray(root, P, YArrayRight.data(),
+//                                          interfaceYArray_New.data(), MWArray.data(), nsp, fuelIndex);
 
-            double mdot = rhoGas * (-fuelDiffCoeff) *
-                          (interfaceYArray_New[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
-                          (rightR - dropletRadius) / (1 - interfaceYArray_New[fuelIndex - 1]) * area;
+//             double mdot = rhoGas * (-fuelDiffCoeff) *
+//                           (interfaceYArray_New[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
+//                           (rightR - dropletRadius) / (1 - interfaceYArray_New[fuelIndex - 1]) * area;
 
-            data->dropletMass -= std::abs(mdot) * delta_t;
-            data->interfaceGasCellArr[1] = root;
-            data->interfaceLiquidCellArr[1] = root;
-            std::copy(interfaceYArray_New.begin(), interfaceYArray_New.end(),
-                      data->interfaceGasCellArr + 2);
-        } else {
-            data->flagSolveInterfaceProblem = false;
-            double mdot = rhoGas * (-fuelDiffCoeff) *
-                          (interfaceYArray_Old[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
-                          (rightR - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex - 1]) * area;
+//             data->dropletMass -= std::abs(mdot) * delta_t;
+//             data->interfaceGasCellArr[1] = root;
+//             data->interfaceLiquidCellArr[1] = root;
+//             std::copy(interfaceYArray_New.begin(), interfaceYArray_New.end(),
+//                       data->interfaceGasCellArr + 2);
+//         } else {
+//             data->flagSolveInterfaceProblem = false;
+//             double mdot = rhoGas * (-fuelDiffCoeff) *
+//                           (interfaceYArray_Old[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
+//                           (rightR - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex - 1]) * area;
 
-            data->dropletMass -= mdot * delta_t;
-        }
-        delete nP;
-    } else {
-        // Skip solving iteration problem
-        double area = calc_area(dropletRadius, &data->metric);
-        double mdot = rhoGas * (-fuelDiffCoeff) *
-                      (interfaceYArray_Old[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
-                      (rightR - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex - 1]) * area;
+//             data->dropletMass -= mdot * delta_t;
+//         }
+//         delete nP;
+//     } else {
+//         // Skip solving iteration problem
+//         double area = calc_area(dropletRadius, &data->metric);
+//         double mdot = rhoGas * (-fuelDiffCoeff) *
+//                       (interfaceYArray_Old[fuelIndex - 1] - YArrayRight[fuelIndex - 1]) /
+//                       (rightR - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex - 1]) * area;
 
-        data->dropletMass -= mdot * delta_t;
-    }
-}
+//         data->dropletMass -= mdot * delta_t;
+//     }
+// }
 
-void updateDropletMass(double* ydata, UserData data, double delta_t) {
-    // Extract reusable parameters
-    size_t nsp = data->nsp;
-    size_t fuelIndex = data->dropII - 1; // Convert to 0-based index
-    double P = data->initialPressure * Cantera::OneAtm;
-    double dropletRadius = interfaceR;
-    double interfaceT = data->interfaceGasCellArr[1];
+// void updateDropletMass(double* ydata, UserData data, double delta_t) {
+//     // Extract reusable parameters
+//     size_t nsp = data->nsp;
+//     size_t fuelIndex = data->dropII - 1; // Convert to 0-based index
+//     double P = data->initialPressure * Cantera::OneAtm;
+//     double dropletRadius = interfaceR;
+//     double interfaceT = data->interfaceGasCellArr[1];
 
-    // Initialize molecular weights and mass fractions
-    std::vector<double>  interfaceYArray_Old(nsp), gasDiffCoeffs(nsp), YArrayRight(nsp);
-    for (size_t i = 0; i < nsp; ++i) {
-        interfaceYArray_Old[i] = data->interfaceGasCellArr[2 + i];
-        YArrayRight[i] = Y(data->nlpts + 1, i + 1);
-    }
+//     // Initialize molecular weights and mass fractions
+//     std::vector<double>  interfaceYArray_Old(nsp), gasDiffCoeffs(nsp), YArrayRight(nsp);
+//     for (size_t i = 0; i < nsp; ++i) {
+//         interfaceYArray_Old[i] = data->interfaceGasCellArr[2 + i];
+//         YArrayRight[i] = Y(data->nlpts + 1, i + 1);
+//     }
 
-    // Set gas state and extract properties
-    gas->setState_TPY(interfaceT, P, interfaceYArray_Old.data());
-    double lambdaGas = trmix->thermalConductivity();
-    trmix->getMixDiffCoeffs(gasDiffCoeffs.data());
-    double rhoGas = gas->density();
-    double fuelDiffCoeff = gasDiffCoeffs[fuelIndex];
+//     // Set gas state and extract properties
+//     gas->setState_TPY(interfaceT, P, interfaceYArray_Old.data());
+//     double lambdaGas = trmix->thermalConductivity();
+//     trmix->getMixDiffCoeffs(gasDiffCoeffs.data());
+//     double rhoGas = gas->density();
+//     double fuelDiffCoeff = gasDiffCoeffs[fuelIndex];
 
-    // Calculate mass flux and update droplet mass
-    double area = calc_area(dropletRadius, &data->metric);
-    double mdot = rhoGas * (-fuelDiffCoeff) *
-                  (interfaceYArray_Old[fuelIndex] - YArrayRight[fuelIndex]) /
-                  (gasR(2) - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex]) * area;
-    data->dropletMass -= std::abs(mdot) * delta_t;
-}
+//     // Calculate mass flux and update droplet mass
+//     double area = calc_area(dropletRadius, &data->metric);
+//     double mdot = rhoGas * (-fuelDiffCoeff) *
+//                   (interfaceYArray_Old[fuelIndex] - YArrayRight[fuelIndex]) /
+//                   (gasR(2) - dropletRadius) / (1 - interfaceYArray_Old[fuelIndex]) * area;
+//     data->dropletMass -= std::abs(mdot) * delta_t;
+// }
 
 // Function to compute the derivative at a given x using Lagrange interpolation
 double computeDerivative(const std::vector<double>& x, const std::vector<double>& y, double targetX) {
@@ -4282,4 +4278,413 @@ double computeDerivative(const std::vector<double>& x, const std::vector<double>
     }
 
     return derivative;
+}
+
+
+
+
+struct InterfaceNPContext {
+    // UserData data;
+    size_t nsp;
+    size_t fuelIndex; // 1-based index
+    double P;
+    // geometry/neighboring states
+    double interface_R;
+    double right_R;
+    double left_R;
+    double left_T, right_T, int_T;
+    // double right_T;
+    double kL, kG;
+    // std::vector<size_t> nonFuelIdx; // 0-based species indices in x ordering
+    std::vector<double> YRight;     // Y at first gas cell (except interface cell)
+    std::vector<double> YInt;	 // Y at interface cell
+    std::vector<double> MW;         // molecular weights
+    double mdot_area;
+};
+
+
+void updateInterfaceState(double* ydata, UserData data, double delta_t){
+    InterfaceNPContext* contextPtr = new InterfaceNPContext();
+    size_t nlpts = data->nlpts;
+
+    /* Initialize context */
+    contextPtr->nsp = data->nsp;
+    contextPtr->fuelIndex = data->dropII; // 1-based index
+    contextPtr->P = data->initialPressure * Cantera::OneAtm ;
+    contextPtr->interface_R = data->interfaceGasCellArr[0];
+    contextPtr->right_R = gasR(2);
+    contextPtr->left_R = liquidR(nlpts);
+    contextPtr->left_T = T(nlpts);
+    contextPtr->right_T = T(nlpts+1);
+    contextPtr->int_T = data->interfaceGasCellArr[1];
+
+    contextPtr->YInt.resize(data->nsp);
+    contextPtr->MW.resize(data->nsp);
+    contextPtr->YRight.resize(data->nsp);
+
+    std::vector<double> YIntArray(data->nsp,0.0);
+
+
+    for (size_t k = 0; k < data->nsp; k++) {
+        contextPtr->YRight[k] =  Y(nlpts+1, k+1);
+        contextPtr->MW[k] = gas->molecularWeight(k);
+        contextPtr->YInt[k] = data->interfaceGasCellArr[k+2];
+        YIntArray[k] = data->interfaceGasCellArr[k+2];
+    }
+
+    const double deltaR = contextPtr->right_R - contextPtr->interface_R;
+    const double relax = 0.10;	       // under-relaxation factor
+    const size_t maxIter = 200;	       // safety cap for iteration count
+    std::vector<double> XIntArray(data->nsp, 0.0);
+    std::vector<double> YV(data->nsp, 0.0);
+    double rho = 0.0;
+    size_t iter = 0;
+    for( iter = 0; iter < maxIter; ++iter) {
+        /* update fuel mass fraction at interface and intermediate step non-fuel mass fractions */
+        std::fill(XIntArray.begin(), XIntArray.end(), 0.0);
+        setGasToUnity(data, contextPtr->int_T, contextPtr->P, contextPtr->YInt.data());
+        gas->getMoleFractions(XIntArray.data());
+
+        double XFuel = heptaneVaporPressure(contextPtr->int_T)/contextPtr->P;
+        double XNonFuelSum = 1.0 - XFuel;
+        double XTemp = 0.0; 
+        double nonBathSum = 0.0; // sum of non-bath species at interface
+        for(size_t k = 0; k < data->nsp; k++) {
+            if(k == contextPtr->fuelIndex-1) {
+                XTemp = XFuel;
+                XIntArray[k] = XTemp;
+                nonBathSum += XTemp;
+            }else if ((k != contextPtr->fuelIndex-1) && (k != data->k_bath-1)) {
+                XTemp = XNonFuelSum * XIntArray[k];
+                if(XTemp > ONE){
+                    printf("XTemp is % .6e for species %10s, greater than 1.0, set to 1.0\n", XTemp, gas->speciesName(k).c_str());
+                    XTemp = ONE;
+                }else if(XTemp < 0.0){
+                    printf("XTemp is % .6e for species %10s, less than 0.0, set to 0.0\n", XTemp, gas->speciesName(k).c_str());
+                    XTemp = 0.0;
+                }
+                XIntArray[k] = XTemp;
+                nonBathSum += XTemp;
+            }
+        }
+
+        /* update non-fuel species mass fractions at interface */
+        XIntArray[data->k_bath-1] = ONE - nonBathSum;
+        setGasToUnityMole(data, contextPtr->int_T, contextPtr->P, XIntArray.data());
+        gas->getMassFractions(contextPtr->YInt.data()); // update the mass fractions at interface once
+
+        getInterfaceTransportWithState(data, contextPtr->int_T, contextPtr->right_T, contextPtr->P,
+                                       contextPtr->YInt.data(), contextPtr->YRight.data(), deltaR, &rho, &contextPtr->kG, YV.data());
+
+        /* update mdot_area and non-fuel species mass fractions at interface */
+        nonBathSum = 0.0;
+        double mdot_area = YV[contextPtr->fuelIndex-1] / (1.0 - contextPtr->YInt[contextPtr->fuelIndex-1]);
+        for(size_t k = 0; k < data->nsp; k++) {
+            if(k == contextPtr->fuelIndex-1) {nonBathSum += contextPtr->YInt[k];}
+            else if ((k != contextPtr->fuelIndex-1) && (k != data->k_bath-1)) {
+                contextPtr->YInt[k] = contextPtr->YInt[k] + relax * ( - YV[k] / mdot_area - contextPtr->YInt[k]) ;
+                nonBathSum += contextPtr->YInt[k];
+            }
+        }
+        contextPtr->YInt[data->k_bath-1] = ONE - nonBathSum;
+
+        singleLiquidFuel->setLiquidState(contextPtr->int_T, contextPtr->P);
+        contextPtr->kL = singleLiquidFuel->calculateThermalConductivity();
+        const double deltaR_l = std::max(contextPtr->interface_R - contextPtr->left_R, 1e-12);
+        const double L = heptaneLatentHeat(contextPtr->int_T); // J/kg
+
+        double c_l = contextPtr->kL / deltaR_l;
+        double c_g = contextPtr->kG / deltaR;
+        double temp_int_T = ((c_l* contextPtr->left_T + c_g* contextPtr->right_T) - L * mdot_area ) / (c_l + c_g);
+
+        double new_int_T = contextPtr->int_T + relax * (temp_int_T - contextPtr->int_T);
+        double deltaT = std::abs(new_int_T - contextPtr->int_T);
+        contextPtr->int_T = new_int_T;
+        contextPtr->mdot_area = mdot_area;
+
+        if(((iter + 1) % 10) == 0) {
+            std::printf("updateInterfaceState iter %zu , temperature=% .3e, deltaT=% .3e\n", iter + 1, contextPtr->int_T, deltaT);
+        }
+
+        if(deltaT < 1.0e-6) {
+            printf("deltaT is % .6e, converged\n", deltaT);
+            break;
+        }
+    }
+
+    if(iter == maxIter) {
+        std::printf("updateInterfaceState failed to converge after %zu iterations\n", maxIter);
+        /* updates only the vaporized mass*/
+        getInterfaceTransportWithState(data, data->interfaceGasCellArr[1], T(nlpts+1), contextPtr->P,
+                                       YIntArray.data(), contextPtr->YRight.data(), deltaR, &rho, &contextPtr->kG, YV.data());
+        double mdot_area = YV[contextPtr->fuelIndex-1] / (1.0 - YIntArray[contextPtr->fuelIndex-1]);
+        double interface_area = calc_area(contextPtr->interface_R, &data->metric);
+        data->dropletMass -= mdot_area * interface_area * delta_t;
+        printf("dropletmass vaporized: % .6e kg\n", mdot_area * interface_area * delta_t);
+        // return;
+    } else if (iter < maxIter) {
+        data->interfaceGasCellArr[1] = contextPtr->int_T;
+        data->interfaceLiquidCellArr[1] = contextPtr->int_T;
+        for(size_t k = 0; k < data->nsp; k++) {
+            data->interfaceGasCellArr[k+2] = contextPtr->YInt[k];
+        }
+    
+        double interface_area = calc_area(contextPtr->interface_R, &data->metric);
+        data->dropletMass -= contextPtr->mdot_area * interface_area * delta_t;
+        printf("dropletmass vaporized: % .6e kg\n", contextPtr->mdot_area * interface_area * delta_t);
+    }
+
+    
+    delete contextPtr;
+    // return 0;
+}
+
+// void updateInterfaceCell(double* ydata, UserData data, double delta_t){
+//     InterfaceNPContext* contextPtr = new InterfaceNPContext();
+//     size_t nlpts = data->nlpts;
+
+//     /* Initialize context */
+//     contextPtr->nsp = data->nsp;
+//     contextPtr->fuelIndex = data->dropII; // 1-based index
+//     contextPtr->P = data->initialPressure * Cantera::OneAtm ;
+//     contextPtr->interface_R = data->interfaceGasCellArr[0];
+//     contextPtr->right_R = gasR(2);
+//     contextPtr->left_R = liquidR(nlpts);
+//     contextPtr->left_T = T(nlpts);    
+//     contextPtr->int_T = data->interfaceGasCellArr[1];
+//     contextPtr->right_T = T(nlpts+1);
+//     contextPtr->YInt.resize(data->nsp);
+//     contextPtr->MW.resize(data->nsp);
+//     contextPtr->YRight.resize(data->nsp);
+
+//     std::vector<double> YIntArrayOld(data->nsp,0.0);
+
+
+//     for (size_t k = 0; k < data->nsp; k++) {
+//         contextPtr->YRight[k] =  Y(nlpts+1, k+1);
+//         contextPtr->MW[k] = gas->molecularWeight(k);
+//         contextPtr->YInt[k] = data->interfaceGasCellArr[k+2];
+//         YIntArrayOld[k] = data->interfaceGasCellArr[k+2];
+//     }
+
+//     setGasToUnity(data, contextPtr->int_T, contextPtr->P, YIntArrayOld.data());
+//     std::vector<double> XIntOldArray(data->nsp, 0.0);
+//     gas->getMoleFractions(XIntOldArray.data());
+//     double XSumNonFuelOld = ONE - XIntOldArray[contextPtr->fuelIndex-1];
+//     double YSumNonFuelOld = ONE - YIntArrayOld[contextPtr->fuelIndex-1];
+
+//     const double deltaR = contextPtr->right_R - contextPtr->interface_R;
+//     std::vector<double> XIntArrayNew(data->nsp, 0.0);
+//     std::vector<double> YV(data->nsp, 0.0);
+//     double rho = 0.0;
+
+//     double XFuel = heptaneVaporPressure(contextPtr->int_T)/contextPtr->P;
+//     double XNonFuelSum = 1.0 - XFuel;
+//     double XTemp = 0.0; 
+//     double nonBathSum = 0.0; // sum of non-bath species at interface
+//     for(size_t k = 0; k < data->nsp; k++) {
+//         if(k == contextPtr->fuelIndex-1) {
+//             XTemp = XFuel;
+//             XIntArrayNew[k] = XTemp;
+//             nonBathSum += XTemp;
+//         }else if ((k != contextPtr->fuelIndex-1) && (k != data->k_bath-1)) {
+//             XTemp = XNonFuelSum/XSumNonFuelOld * XIntOldArray[k];
+//             if(XTemp > ONE){
+//                 printf("XTemp is % .6e for species %10s, greater than 1.0, set to 1.0\n", XTemp, gas->speciesName(k).c_str());
+//                 XTemp = ONE;
+//             }else if(XTemp < 0.0){
+//                 printf("XTemp is % .6e for species %10s, less than 0.0, set to 0.0\n", XTemp, gas->speciesName(k).c_str());
+//                 XTemp = 0.0;
+//             }
+//             XIntArrayNew[k] = XTemp;
+//             nonBathSum += XTemp;
+//         }
+//     }
+
+//     /* update non-fuel species mass fractions at interface */
+//     XIntArrayNew[data->k_bath-1] = ONE - nonBathSum;
+//     setGasToUnityMole(data, contextPtr->int_T, contextPtr->P, XIntArrayNew.data());
+//     gas->getMassFractions(contextPtr->YInt.data()); // update the mass fractions at interface once
+
+    
+//     setGasToUnityMole(data, contextPtr->int_T, contextPtr->P, contextPtr->YInt.data());
+//     getInterfaceTransportWithState(data, contextPtr->int_T, contextPtr->right_T, contextPtr->P,
+//         contextPtr->YInt.data(), contextPtr->YRight.data(), deltaR, &rho, &contextPtr->kG, YV.data());
+
+//     double mdot_area = YV[contextPtr->fuelIndex-1] / (1.0 - contextPtr->YInt[contextPtr->fuelIndex-1]);
+
+//     /* Rescale the mass fraction of non-fuel*/
+//     double YSumNonFuelNew = ONE - contextPtr->YInt[contextPtr->fuelIndex-1];
+//     double YSumTemp = 0.0;
+//     for(size_t k = 0; k < data->nsp; k++) {
+//         if(k == contextPtr->fuelIndex-1) {
+//             YSumTemp += contextPtr->YInt[k]; // add the fuel mass fraction to the sum
+//         }else if ((k != contextPtr->fuelIndex-1) && (k != data->k_bath-1)) {
+//             contextPtr->YInt[k] = YIntArrayOld[k] * YSumNonFuelNew / YSumNonFuelOld;
+//             YSumTemp += contextPtr->YInt[k];
+//         }
+//     }
+//     contextPtr->YInt[data->k_bath-1] = ONE - YSumTemp;
+
+//     /* update the interface cell temperature*/
+//     singleLiquidFuel->setLiquidState(contextPtr->int_T, contextPtr->P);
+//     contextPtr->kL = singleLiquidFuel->calculateThermalConductivity();
+//     const double deltaR_l = std::max(contextPtr->interface_R - contextPtr->left_R, 1e-12);
+//     const double L = heptaneLatentHeat(contextPtr->int_T); // J/kg
+
+//     double c_l = contextPtr->kL / deltaR_l;
+//     double c_g = contextPtr->kG / deltaR;
+//     double temp_int_T = ((c_l* contextPtr->left_T + c_g* contextPtr->right_T) - L * mdot_area ) / (c_l + c_g);
+
+//     double relax= 0.5;
+//     double new_int_T = contextPtr->int_T + relax * (temp_int_T - contextPtr->int_T);
+
+//     /*update interface state*/
+//     double area = calc_area(contextPtr->interface_R, &data->metric);
+//     if(new_int_T > contextPtr->int_T && new_int_T < contextPtr->right_T) {
+//         data->interfaceGasCellArr[1] = new_int_T;
+//         data->interfaceLiquidCellArr[1] = new_int_T;
+//         for(size_t k = 0; k < data->nsp; k++) {
+//             data->interfaceGasCellArr[k+2] = contextPtr->YInt[k];
+//         }
+        
+//     }else if(new_int_T < contextPtr->int_T) {
+//         data->interfaceGasCellArr[1] = contextPtr->int_T;
+//     }else if(new_int_T > contextPtr->right_T) {
+//         data->interfaceGasCellArr[1] = contextPtr->right_T;
+//     }
+//     data->dropletMass -= mdot_area * area * delta_t;
+//     printf("dropletmass vaporized: % .6e kg\n", mdot_area * area * delta_t);
+
+//     delete contextPtr;
+// }
+
+void updateInterfaceCell(double* ydata, UserData data, double delta_t)
+{
+    const size_t nsp   = data->nsp;
+    const size_t nlpts = data->nlpts;
+    const size_t ifuel = data->dropII - 1;   // 0-based
+    const size_t ibath = data->k_bath - 1;
+
+    // -------------------------------
+    // Geometry & state
+    // -------------------------------
+    const double P      = data->initialPressure * Cantera::OneAtm;
+    const double Rint   = data->interfaceGasCellArr[0];
+    const double Rg     = gasR(2);
+    const double Rl     = liquidR(nlpts);
+    const double Tg     = T(nlpts+1);
+    const double Tl     = T(nlpts);
+    double       Tint   = data->interfaceGasCellArr[1];
+
+    const double deltaRg = Rg - Rint;
+    const double deltaRl = std::max(Rint - Rl, 1e-12);
+
+    std::vector<double> Yint(nsp, 0.0);
+    std::vector<double> Yg(nsp, 0.0);
+    std::vector<double> YV(nsp, 0.0);
+
+    for (size_t k=0; k<nsp; ++k)
+        Yg[k] = Y(nlpts+1, k+1);
+
+    // -------------------------------
+    // 1) Fuel mass fraction at interface (equilibrium)
+    // -------------------------------
+    // Compute X_f = Psat / P, then convert to Y_f using Cantera (fuel+air only)
+    std::vector<double> Xtmp(nsp, 0.0);
+    Xtmp[ifuel] = std::min(0.999999, std::max(0.0,
+                    heptaneVaporPressure(Tint) / P));
+    Xtmp[ibath] = 1.0 - Xtmp[ifuel];
+
+    setGasToUnityMole(data, Tint, P, Xtmp.data());
+
+    std::vector<double> Ytmp(nsp, 0.0);
+    gas->getMassFractions(Ytmp.data());
+
+    double Yf = std::min(0.999999, std::max(0.0, Ytmp[ifuel]));
+    Yint[ifuel] = Yf;
+
+    // -------------------------------
+    // 2) Copy non-fuel species from inner gas cell
+    // -------------------------------
+    for (size_t k=0; k<nsp; ++k) {
+        if (k == ifuel) continue;
+        Yint[k] = std::max(0.0, Yg[k]);
+    }
+
+    // -------------------------------
+    // 3) Renormalize bath species so ΣY = 1 (fuel fixed)
+    // -------------------------------
+    double sumBath = 0.0;
+    for (size_t k=0; k<nsp; ++k)
+        if (k != ifuel) sumBath += Yint[k];
+
+    if (sumBath < 1e-14) {
+        // fallback: pure bath
+        for (size_t k=0; k<nsp; ++k) Yint[k] = 0.0;
+        Yint[ifuel] = Yf;
+        Yint[ibath] = 1.0 - Yf;
+    } else {
+        const double scale = (1.0 - Yf) / sumBath;
+        for (size_t k=0; k<nsp; ++k)
+            if (k != ifuel) Yint[k] *= scale;
+        Yint[ifuel] = Yf;
+    }
+
+    // -------------------------------
+    // 4) Fuel diffusive flux → mdot
+    // -------------------------------
+    double rho = 0.0, kG = 0.0;
+
+    getInterfaceTransportWithState(
+        data,
+        Tint,
+        Tg,
+        P,
+        Yint.data(),
+        Yg.data(),
+        deltaRg,
+        &rho,
+        &kG,
+        YV.data()
+    );
+
+    const double denom = std::max(1e-14, 1.0 - Yf);
+    double mdot_area = YV[ifuel] / denom;
+    if (mdot_area < 0.0) mdot_area = 0.0;  // evaporation only
+
+    // -------------------------------
+    // 5) Energy balance → new Tint
+    // -------------------------------
+    singleLiquidFuel->setLiquidState(Tint, P);
+    const double kL = singleLiquidFuel->calculateThermalConductivity();
+    const double L  = heptaneLatentHeat(Tint);
+
+    const double cL = kL / deltaRl;
+    const double cG = kG / deltaRg;
+
+    double Tint_star =
+        ((cL * Tl + cG * Tg) - mdot_area * L) / (cL + cG);
+
+    const double relaxT = 0.2;
+    Tint = Tint + relaxT * (Tint_star - Tint);
+
+    // Optional physical clamp
+    Tint = std::min(std::max(Tint, 200.0), 5000.0);
+
+    // -------------------------------
+    // 6) Write back & update droplet mass
+    // -------------------------------
+    data->interfaceGasCellArr[1]    = Tint;
+    data->interfaceLiquidCellArr[1] = Tint;
+
+    for (size_t k=0; k<nsp; ++k)
+        data->interfaceGasCellArr[k+2] = Yint[k];
+
+    const double area = calc_area(Rint, &data->metric);
+    data->dropletMass -= mdot_area * area * delta_t;
+
+    printf("mdot = %.6e  dM = %.6e kg\n",
+           mdot_area, mdot_area * area * delta_t);
+//    printf("interface temperature = %.6e K\n", Tint);
 }

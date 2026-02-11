@@ -10,6 +10,8 @@
 #define COOLPROP_DEF
 #include <CoolProp.h>
 #include <CoolPropLib.h>
+#include "AbstractState.h"
+#include <memory>
 #endif
 
 #include "gridRoutines.h"
@@ -18,69 +20,51 @@
 #define LIQUID_DEF
 #include <iostream>
 #include <stdexcept>
-#include "CoolProp.h"  // Include CoolProp for property calculations
 
 typedef struct LiquidFuelProperties {
     double temperature; // Temperature in Kelvin
     double pressure;    // Pressure in Pascal
+    std::unique_ptr<CoolProp::AbstractState> state;
 
-    /**
-     * @brief Default constructor initializes to a reasonable state.
-     */
     LiquidFuelProperties()
-            : temperature(298), pressure(1e5) {}  // Default to 25°C and 1 atm
+            : temperature(298), pressure(1e5),
+              state(CoolProp::AbstractState::factory("HEOS", "nHeptane"))
+    {
+        state->update(CoolProp::PT_INPUTS, pressure, temperature);
+    }
 
-    /**
-     * @brief Set the state of the liquid with temperature and pressure.
-     * @param T Temperature in Kelvin.
-     * @param P Pressure in Pascal.
-     */
     void setLiquidState(double T, double P) {
-        if (T < 182 || T > 600) { // Valid range for n-heptane (boiling point ~ 371K)
-            throw std::out_of_range("Temperature is out of valid range (182–600 K) for n-heptane.");
+        if (T < 182 || T > 600) {
+            throw std::out_of_range("Temperature is out of valid range (182-600 K) for n-heptane.");
         }
-        if (P < 1e5 || P > 1e7) { // Typical valid pressure range
-            throw std::out_of_range("Pressure is out of valid range (1e5–1e7 Pa).");
+        if (P < 1e5 || P > 1e7) {
+            throw std::out_of_range("Pressure is out of valid range (1e5-1e7 Pa).");
         }
         temperature = T;
         pressure = P;
+        state->update(CoolProp::PT_INPUTS, P, T);
     }
 
-    /**
-     * @brief Calculate the density of liquid n-heptane.
-     * @return Density in kg/m³.
-     */
     double calculateDensity() const {
-        return CoolProp::PropsSI("D", "T", temperature, "P", pressure, "nHeptane");
+        return state->rhomass();
     }
 
-    /**
-     * @brief Calculate the thermal conductivity of liquid n-heptane.
-     * @return Thermal conductivity in W/(m·K).
-     */
     double calculateThermalConductivity() const {
-        return CoolProp::PropsSI("L", "T", temperature, "P", pressure, "nHeptane");
+        return state->conductivity();
     }
 
-    /**
-     * @brief Calculate the specific heat capacity of liquid n-heptane.
-     * @return Specific heat capacity in J/(kg·K).
-     */
     double calculateSpecificHeatCapacity() const {
-        return CoolProp::PropsSI("C", "T", temperature, "P", pressure, "nHeptane");
+        return state->cpmass();
     }
 
-    /**
-     * @brief Print all properties of n-heptane.
-     */
     void print() const {
         try {
             std::cout << "n-Heptane Properties:\n";
             std::cout << "Temperature (K): " << temperature << "\n";
             std::cout << "Pressure (Pa): " << pressure << "\n";
-            std::cout << "Density (kg/m³): " << calculateDensity() << "\n";
-            std::cout << "Thermal Conductivity (W/(m·K)): " << calculateThermalConductivity() << "\n";
-            std::cout << "Specific Heat Capacity (J/(kg·K)): " << calculateSpecificHeatCapacity() << "\n";
+            std::cout << "Density (kg/m3): " << calculateDensity() << "\n";
+            std::cout << "Thermal Conductivity (W/(m*K)): " << calculateThermalConductivity() << "\n";
+            std::cout << "Specific Heat Capacity (J/(kg*K)): " << calculateSpecificHeatCapacity() << "\n";
         } catch (const std::exception &e) {
             std::cerr << "Error while calculating properties: " << e.what() << '\n';
         }

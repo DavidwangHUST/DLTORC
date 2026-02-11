@@ -36,6 +36,7 @@
 #include <sundials/sundials_types.h>   /* definition of type realtype */
 #include <sundials/sundials_math.h>    /* definition of ABS and EXP */
 #include <ctime>
+#include <omp.h>
 
 
 static int check_flag(void *flagvalue, 
@@ -63,6 +64,11 @@ int main(){
   		freeUserData(data);
 		return(-1);
 	}
+
+    omp_set_dynamic(0);
+    if (data->nThreads > 0) {
+        omp_set_num_threads(data->nThreads);
+    }
 	long int ier,mu,ml,count,netf,ncfn,njevals,nrevals;
 	realtype tNow,*atolvdata,*constraintsdata,finalTime,tolsfac;
 
@@ -243,13 +249,15 @@ int main(){
             dt=tNow-t1;
 
             //TODO: update the interface gas and liquid array (except R), mdot and dropletMass
-            updateInterfaceState(ydata,data,dt) ;
+//            updateInterfaceState(ydata,data,dt) ;
+            updateInterfaceCell(ydata,data,dt) ;
 
             //TODO: only update the droplet mass and radius
 //            updateDropletMass(ydata,data,dt) ;
 
             // DEBUG
-            printf("Interface temperature : %.6f \n",data->interfaceGasCellArr[1]);
+            printf("Interface temperature : %.3f [K] \n",data->interfaceGasCellArr[1]);
+            printf("Droplet radius : %.3e [m] \n",data->interfaceGasCellArr[0]);
             printDropletGlobalOutput(data,data->dropletGlobalOutput,tNow);
 
             ier = CVodeGetCurrentOrder(memCVODE, &kcur);
@@ -402,8 +410,14 @@ int main(){
 
 			count++;
 			data->nTimeSteps=count;
+
+			printf("\nElapsed Wall Clock Time: %15.6e s\n",get_wall_time()-data->clockStart);
+     		printf("Elapsed CPU Time:        %15.6e s\n",get_cpu_time());
+			printf("---------------------------------------------------------\n\n\n");
 		}
 	}
+
+
 
 	SUNLinSolFree(LS);
 	SUNMatDestroy(A);

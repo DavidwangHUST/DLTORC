@@ -520,13 +520,17 @@ UserData allocateUserData(FILE *input){
     }else{
         strcpy(data->model,chem);
         int succeed = 0;
-#pragma omp parallel default(none) shared(chem, data) reduction(+:succeed)
+        size_t nsp_temp = 0;
+#pragma omp parallel default(none) shared(chem, nsp_temp) reduction(+:succeed)
         {
             try {
-                gas = new Cantera::IdealGasMix(chem);
-//#pragma omp critical
-                data->nsp = gas->nSpecies(); //assign no: of species
-
+                if (!gas) {
+                    gas = new Cantera::IdealGasMix(chem);
+                }
+                #pragma omp single
+                {
+                    nsp_temp = gas->nSpecies();
+                }
             } catch (Cantera::CanteraError &err) {
                 printf("Error:\n");
                 printf("%s\n", err.what());
@@ -536,6 +540,7 @@ UserData allocateUserData(FILE *input){
         if(succeed != 0) {
             return(NULL);
         }
+        data->nsp = nsp_temp; //assign no: of species (outside parallel region)
     }
 
 
@@ -590,10 +595,15 @@ UserData allocateUserData(FILE *input){
         return(NULL);
     }else{
         int succeed = 0;
-#pragma omp parallel default(none) shared(tran, data) reduction(+:succeed)
+#pragma omp parallel default(none) shared(tran, chem) reduction(+:succeed)
         {
             try {
-                trmix = Cantera::newTransportMgr(tran, gas);
+                if (!gas) {
+                    gas = new Cantera::IdealGasMix(chem);
+                }
+                if (!trmix) {
+                    trmix = Cantera::newTransportMgr(tran, gas);
+                }
             } catch (Cantera::CanteraError &err) {
                 printf("Error:\n");
                 printf("%s\n", err.what());
@@ -633,9 +643,12 @@ UserData allocateUserData(FILE *input){
         {
             if (gas != NULL) {
                 try {
-                    gas->setState_TPX(data->initialTemperature,
-                                      data->initialPressure * Cantera::OneAtm,
-                                      mix);
+                    #pragma omp critical
+                    {
+                        gas->setState_TPX(data->initialTemperature,
+                                        data->initialPressure * Cantera::OneAtm,
+                                        mix);
+                    }
                 } catch (Cantera::CanteraError &err) {
                     printf("Error:\n");
                     printf("%s\n", err.what());
@@ -808,8 +821,10 @@ UserData allocateUserData(FILE *input){
 //    data->singleLiquidFuel = new LiquidFuelProperties;
 #pragma omp parallel default(none)
     {
-        singleLiquidFuel = new LiquidFuelProperties;
-    };
+        if (!singleLiquidFuel) {
+            singleLiquidFuel = new LiquidFuelProperties;
+        }
+    }
 	return(data);
 }
 

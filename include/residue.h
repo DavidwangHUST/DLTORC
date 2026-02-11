@@ -21,8 +21,15 @@
 #endif
 
 #include "UserData.h"
+// #include "interface_solver.h"
 #include <ctime>
 double maxTemperature(double *ydata, UserData data);
+
+void setGasToUnity(UserData data, double temperature,
+	double pressure,double* YArrayPtr);
+
+void setGasToUnityMole(UserData data, double temperature,
+	double pressure,double* XArrayPtr);
 
 double maxGradPosition(const double* y, const size_t nt, 
 	               const size_t nvar, const double* x, size_t nPts);
@@ -69,6 +76,17 @@ void getTransport(UserData data,
 		  double *rho,
 		  double *lambda,
 		  double *YV);
+
+void getInterfaceTransportWithState(UserData data,
+					const double TLeft,
+					const double TRight,
+					const double P,
+					const double* YLeft,
+					const double* YRight,
+					const double deltaR,
+					double *rho,
+					double *lambda,
+					double YV[]);
 
 int fun(double t, 
 	    N_Vector y, 
@@ -190,3 +208,6 @@ void getInterfaceMassFlux(double TLeft,double TRight,double P,double YArrayLeft[
 double computeDerivative(const std::vector<double>& x, const std::vector<double>& y, double targetX);
 double octaneVaporPressure(double temperature);
 double octaneLatentHeat(double T);
+
+void updateInterfaceState(double* ydata, UserData data, double delta_t);
+void updateInterfaceCell(double* ydata, UserData data, double delta_t);

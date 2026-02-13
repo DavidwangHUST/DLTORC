@@ -129,20 +129,6 @@ int main(){
 	//LS=SUNBandLinearSolver(y,A);
 	LS=SUNLapackBand(y,A);
 
-//--------------------------------create KINSOL solver--------------------------------
-	const size_t n_if = 2 + data->nsp -1 ; // Ti,mdot , Y1...Y_{nsp-1}
-	N_Vector u_iface = make_vec(n_if);
-	N_Vector s_scale = make_vec(n_if);
-    N_Vector f_scale = make_vec(n_if);
-    
-	NV_Ith_S(u_iface,0) = data->interfaceGasCellArr[1];
-	NV_Ith_S(u_iface,1) = data->Mdot;
-	for(size_t k =0 ;k<data->nsp-1;k++) NV_Ith_S(u_iface,k+2) = data->interfaceGasCellArr[k+2];
-	N_VConst(1.0,s_scale);
-    N_VConst(1.0e-3,f_scale);
-
-
-
 //	printf("CVODE memory: %p\n", memCVODE);
 //	printf("SUNMatrix A: %p\n", A);
 //	printf("SUNLinearSolver LS: %p\n", LS);

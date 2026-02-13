@@ -819,11 +819,36 @@ UserData allocateUserData(FILE *input){
 	
 	data->innerMassFractions = new double [data->nsp];
 //    data->singleLiquidFuel = new LiquidFuelProperties;
-#pragma omp parallel default(none)
+    // Warm up CoolProp registry once before thread-local construction.
+    try {
+        std::unique_ptr<CoolProp::AbstractState> warmup(
+                CoolProp::AbstractState::factory("HEOS", "nHeptane"));
+        warmup->update(CoolProp::PT_INPUTS, 1.0e5, 298.0);
+    } catch (const std::exception& e) {
+        printf("CoolProp warmup failed: %s\n", e.what());
+        return NULL;
+    }
+
+    int liquidInitFail = 0;
+#pragma omp parallel default(none) reduction(+:liquidInitFail)
     {
-        if (!singleLiquidFuel) {
-            singleLiquidFuel = new LiquidFuelProperties;
+        try {
+#pragma omp critical(coolprop_liquid_model_init)
+            {
+                if (!singleLiquidFuel) {
+                    singleLiquidFuel = new LiquidFuelProperties;
+                }
+            }
+        } catch (const std::exception& e) {
+#pragma omp critical
+            {
+                printf("Thread %d liquid model init failed: %s\n", omp_get_thread_num(), e.what());
+            }
+            liquidInitFail += 1;
         }
+    }
+    if (liquidInitFail > 0) {
+        return NULL;
     }
 	return(data);
 }

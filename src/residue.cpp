@@ -2186,6 +2186,12 @@ int funNew(double t,
 //    getR(ydata,data);
     getRNew(ydata,data);// update R array
 
+    // Guard against unphysical temperatures from CVODE's Newton iteration.
+    // Return +1 (recoverable error): CVODE will reduce the step and retry.
+    for (size_t j = 1; j <= nlpts + npts; j++) {
+        if (T(j) < 200.0 || T(j) > 6000.0) return 1;
+    }
+
     innerMassFractionsData =  data->innerMassFractions;
 
     /* Grid stencil:*/

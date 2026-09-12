@@ -4631,6 +4631,8 @@ void updateInterfaceCell(double* ydata, UserData data, double delta_t)
     const double atolT   = 1.0e-3;
     const double rtolT   = 1.0e-6;
     const double relaxT  = 0.5;
+    const double Tmin    = 183.0;
+    const double Tmax    = 599.0;
 
     double rho       = 0.0;
     double kG        = 0.0;
@@ -4639,7 +4641,7 @@ void updateInterfaceCell(double* ydata, UserData data, double delta_t)
     int    iter      = 0;
 
     for (iter = 0; iter < maxIter; ++iter) {
-        Tint = std::min(std::max(Tint, 183.0), 599.0);
+        Tint = std::min(std::max(Tint, Tmin), Tmax);
 
         // -------------------------------
         // 1) Fuel mass fraction at interface (equilibrium)
@@ -4723,7 +4725,7 @@ void updateInterfaceCell(double* ydata, UserData data, double delta_t)
 
         double Tint_star =
             ((cL * Tl + cG * Tg) - mdot_area * L) / (cL + cG);
-        Tint_star = std::min(std::max(Tint_star, 200.0), 599.0);
+        Tint_star = std::min(std::max(Tint_star, Tmin), Tmax);
 
         dT = std::abs(Tint_star - Tint);
         Tint = Tint + relaxT * (Tint_star - Tint);

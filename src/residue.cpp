@@ -2184,12 +2184,21 @@ int funNew(double t,
     }
 
 //    getR(ydata,data);
-    getRNew(ydata,data);// update R array
 
     // Guard against unphysical temperatures from CVODE's Newton iteration.
+    // MUST run before getRNew(), which calls setLiquidState() whose valid
+    // range for n-heptane is T in [182, 600] K.
     // Return +1 (recoverable error): CVODE will reduce the step and retry.
     for (size_t j = 1; j <= nlpts + npts; j++) {
-        if (T(j) < 200.0 || T(j) > 6000.0) return 1;
+        if (T(j) < 182.0 || T(j) > 6000.0) return 1;
+        if (j <= nlpts && T(j) > 600.0)     return 1;  // liquid CoolProp upper limit
+    }
+    try {
+        getRNew(ydata,data);// update R array
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[funNew] getRNew exception: %s — requesting step reduction\n",
+                e.what());
+        return 1;
     }
 
     innerMassFractionsData =  data->innerMassFractions;
@@ -2740,14 +2749,21 @@ int funNew(double t,
     // flux variables of nlpts-1
     double rhoLiquidhalf[nlpts-1],lambdaLiquidhalf[nlpts-1],areaLiquidhalf[nlpts-1],areaLiquidhalfsq[nlpts-1];
 
-#pragma omp parallel for schedule(static) default(none) shared(rhoLiquidhalf,lambdaLiquidhalf,areaLiquidhalf,areaLiquidhalfsq,nlpts,data,ydata,m)
+    int liquidFluxError = 0;
+#pragma omp parallel for schedule(static) default(none) shared(rhoLiquidhalf,lambdaLiquidhalf,areaLiquidhalf,areaLiquidhalfsq,nlpts,data,ydata,m,liquidFluxError)
     for (size_t j = 1; j <= nlpts - 1; j++) {
         areaLiquidhalf[j - 1] = calc_area(HALF * (liquidR(j) + liquidR(j + 1)), &m);
         areaLiquidhalfsq[j - 1] = areaLiquidhalf[j - 1] * areaLiquidhalf[j - 1];
-        singleLiquidFuel->setLiquidState(HALF * (T(j) + T(j + 1)), P(j));
-        lambdaLiquidhalf[j - 1] = singleLiquidFuel->calculateThermalConductivity();
-        rhoLiquidhalf[j - 1] = singleLiquidFuel->calculateDensity();
+        try {
+            singleLiquidFuel->setLiquidState(HALF * (T(j) + T(j + 1)), P(j));
+            lambdaLiquidhalf[j - 1] = singleLiquidFuel->calculateThermalConductivity();
+            rhoLiquidhalf[j - 1] = singleLiquidFuel->calculateDensity();
+        } catch (const std::exception&) {
+            #pragma omp atomic write
+            liquidFluxError = 1;
+        }
     }
+    if (liquidFluxError) return 1;
 
     /***** LIQUID PHASE PART GOVERNING EQUATIONS CODE SECTION *****/
     // -- Precompute initial states for j = 1 and j = 2
@@ -2833,7 +2849,13 @@ int funNew(double t,
         detap = std::abs(eta(nlpts+1) - eta(nlpts));
         detaav = HALF * std::abs(eta(nlpts+1) - eta(nlpts-1));
 
-        singleLiquidFuel->setLiquidState(T(nlpts),P(nlpts));
+        try {
+            singleLiquidFuel->setLiquidState(T(nlpts),P(nlpts));
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[funNew] setLiquidState(nlpts) exception: %s — requesting step reduction\n",
+                    e.what());
+            return 1;
+        }
         rho = singleLiquidFuel->calculateDensity();
         Cpb = singleLiquidFuel->calculateSpecificHeatCapacity();
         lambdaphalf = singleLiquidFuel->calculateThermalConductivity();
@@ -2871,10 +2893,19 @@ void printDropletGlobalHeader(UserData data,FILE* output){
 }
 
 void printDropletGlobalOutput(UserData data,FILE* output,double t){
-    double T = data->interfaceGasCellArr[1];
-    fprintf(output,"%15.6e\t",t);
-    fprintf((output), "%15.6e\t%15.6e\t%15.6e\t",data->dropletMass,interfaceR,T);
-    fprintf((output), "\n");
+    // droplet surface radius [m]: use interfaceGasCellArr[0] (= data->Rd after getRNew,
+    // but also correctly initialised by readInitialCondition1 before the first getRNew call)
+    const double Rd    = data->interfaceGasCellArr[0];
+    // gas-side surface temperature [K]: updated by updateInterfaceCell
+    const double Tsurf = data->interfaceGasCellArr[1];
+    // droplet mass [kg]: calc_area uses r² (not 4π·r²), so the stored quantity is
+    // actual_mass / (4π).  Multiply back to recover SI kilograms.
+    const double mass  = 4.0 * acos(-1.0) * data->dropletMass;
+
+    fprintf(output, "%15.6e\t", t);
+    fprintf(output, "%15.6e\t%15.6e\t%15.6e\t", mass, Rd, Tsurf);
+    fprintf(output, "\n");
+    fflush(output);
 }
 
 
@@ -4339,7 +4370,7 @@ void updateInterfaceState(double* ydata, UserData data, double delta_t){
     }
 
     const double deltaR = contextPtr->right_R - contextPtr->interface_R;
-    const double relax = 0.10;	       // under-relaxation factor
+    const double relax = 0.50;	       // under-relaxation factor
     const size_t maxIter = 200;	       // safety cap for iteration count
     std::vector<double> XIntArray(data->nsp, 0.0);
     std::vector<double> YV(data->nsp, 0.0);
@@ -4593,93 +4624,121 @@ void updateInterfaceCell(double* ydata, UserData data, double delta_t)
     for (size_t k=0; k<nsp; ++k)
         Yg[k] = Y(nlpts+1, k+1);
 
-    // -------------------------------
-    // 1) Fuel mass fraction at interface (equilibrium)
-    // -------------------------------
-    // Compute X_f = Psat / P, then convert to Y_f using Cantera (fuel+air only)
     std::vector<double> Xtmp(nsp, 0.0);
-    Xtmp[ifuel] = std::min(0.999999, std::max(0.0,
-                    heptaneVaporPressure(Tint) / P));
-    Xtmp[ibath] = 1.0 - Xtmp[ifuel];
-
-    setGasToUnityMole(data, Tint, P, Xtmp.data());
-
     std::vector<double> Ytmp(nsp, 0.0);
-    gas->getMassFractions(Ytmp.data());
 
-    double Yf = std::min(0.999999, std::max(0.0, Ytmp[ifuel]));
-    Yint[ifuel] = Yf;
+    const int    maxIter = 50;
+    const double atolT   = 1.0e-3;
+    const double rtolT   = 1.0e-6;
+    const double relaxT  = 0.5;
 
-    // -------------------------------
-    // 2) Copy non-fuel species from inner gas cell
-    // -------------------------------
-    for (size_t k=0; k<nsp; ++k) {
-        if (k == ifuel) continue;
-        Yint[k] = std::max(0.0, Yg[k]);
-    }
+    double rho       = 0.0;
+    double kG        = 0.0;
+    double mdot_area = 0.0;
+    double dT        = 0.0;
+    int    iter      = 0;
 
-    // -------------------------------
-    // 3) Renormalize bath species so ΣY = 1 (fuel fixed)
-    // -------------------------------
-    double sumBath = 0.0;
-    for (size_t k=0; k<nsp; ++k)
-        if (k != ifuel) sumBath += Yint[k];
+    for (iter = 0; iter < maxIter; ++iter) {
+        Tint = std::min(std::max(Tint, 183.0), 599.0);
 
-    if (sumBath < 1e-14) {
-        // fallback: pure bath
-        for (size_t k=0; k<nsp; ++k) Yint[k] = 0.0;
+        // -------------------------------
+        // 1) Fuel mass fraction at interface (equilibrium)
+        // -------------------------------
+        // Compute X_f = Psat / P, then convert to Y_f using Cantera (fuel+air only)
+        Xtmp[ifuel] = std::min(0.999999, std::max(0.0,
+                        heptaneVaporPressure(Tint) / P));
+        Xtmp[ibath] = 1.0 - Xtmp[ifuel];
+
+        setGasToUnityMole(data, Tint, P, Xtmp.data());
+        gas->getMassFractions(Ytmp.data());
+
+        const double Yf = std::min(0.999999, std::max(0.0, Ytmp[ifuel]));
         Yint[ifuel] = Yf;
-        Yint[ibath] = 1.0 - Yf;
-    } else {
-        const double scale = (1.0 - Yf) / sumBath;
+
+        // -------------------------------
+        // 2) Copy non-fuel species from inner gas cell
+        // -------------------------------
+        for (size_t k=0; k<nsp; ++k) {
+            if (k == ifuel) continue;
+            Yint[k] = std::max(0.0, Yg[k]);
+        }
+
+        // -------------------------------
+        // 3) Renormalize bath species so ΣY = 1 (fuel fixed)
+        // -------------------------------
+        double sumBath = 0.0;
         for (size_t k=0; k<nsp; ++k)
-            if (k != ifuel) Yint[k] *= scale;
-        Yint[ifuel] = Yf;
+            if (k != ifuel) sumBath += Yint[k];
+
+        if (sumBath < 1e-14) {
+            // fallback: pure bath
+            for (size_t k=0; k<nsp; ++k) Yint[k] = 0.0;
+            Yint[ifuel] = Yf;
+            Yint[ibath] = 1.0 - Yf;
+        } else {
+            const double scale = (1.0 - Yf) / sumBath;
+            for (size_t k=0; k<nsp; ++k)
+                if (k != ifuel) Yint[k] *= scale;
+            Yint[ifuel] = Yf;
+        }
+
+        // -------------------------------
+        // 4) Fuel diffusive flux → mdot
+        // -------------------------------
+        getInterfaceTransportWithState(
+            data,
+            Tint,
+            Tg,
+            P,
+            Yint.data(),
+            Yg.data(),
+            deltaRg,
+            &rho,
+            &kG,
+            YV.data()
+        );
+
+        const double denom = std::max(1e-14, 1.0 - Yf);
+        mdot_area = YV[ifuel] / denom;
+        if (mdot_area < 0.0) mdot_area = 0.0;  // evaporation only
+
+        // -------------------------------
+        // 5) Energy balance → new Tint
+        // -------------------------------
+        // Clamp Tint to CoolProp's valid range for n-heptane before calling
+        // setLiquidState so that an overshoot from the previous step cannot crash.
+        double kL;
+        try {
+            singleLiquidFuel->setLiquidState(Tint, P);
+            kL = singleLiquidFuel->calculateThermalConductivity();
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[updateInterfaceCell] setLiquidState failed (Tint=%.2f): %s — skipping update\n",
+                    Tint, e.what());
+            return;
+        }
+        const double L  = heptaneLatentHeat(Tint);
+
+        const double cL = kL / deltaRl;
+        const double cG = kG / deltaRg;
+
+        double Tint_star =
+            ((cL * Tl + cG * Tg) - mdot_area * L) / (cL + cG);
+        Tint_star = std::min(std::max(Tint_star, 200.0), 599.0);
+
+        dT = std::abs(Tint_star - Tint);
+        Tint = Tint + relaxT * (Tint_star - Tint);
+
+        if (dT < atolT + rtolT * std::abs(Tint))
+            break;
+    }
+
+    if (iter == maxIter) {
+        fprintf(stderr, "[updateInterfaceCell] Tint Picard did not converge after %d iterations (dT=%.4e K)\n",
+                maxIter, dT);
     }
 
     // -------------------------------
-    // 4) Fuel diffusive flux → mdot
-    // -------------------------------
-    double rho = 0.0, kG = 0.0;
-
-    getInterfaceTransportWithState(
-        data,
-        Tint,
-        Tg,
-        P,
-        Yint.data(),
-        Yg.data(),
-        deltaRg,
-        &rho,
-        &kG,
-        YV.data()
-    );
-
-    const double denom = std::max(1e-14, 1.0 - Yf);
-    double mdot_area = YV[ifuel] / denom;
-    if (mdot_area < 0.0) mdot_area = 0.0;  // evaporation only
-
-    // -------------------------------
-    // 5) Energy balance → new Tint
-    // -------------------------------
-    singleLiquidFuel->setLiquidState(Tint, P);
-    const double kL = singleLiquidFuel->calculateThermalConductivity();
-    const double L  = heptaneLatentHeat(Tint);
-
-    const double cL = kL / deltaRl;
-    const double cG = kG / deltaRg;
-
-    double Tint_star =
-        ((cL * Tl + cG * Tg) - mdot_area * L) / (cL + cG);
-
-    const double relaxT = 0.2;
-    Tint = Tint + relaxT * (Tint_star - Tint);
-
-    // Optional physical clamp
-    Tint = std::min(std::max(Tint, 200.0), 5000.0);
-
-    // -------------------------------
-    // 6) Write back & update droplet mass
+    // 6) Write back & update droplet mass (once, using last iterate)
     // -------------------------------
     data->interfaceGasCellArr[1]    = Tint;
     data->interfaceLiquidCellArr[1] = Tint;
@@ -4690,7 +4749,7 @@ void updateInterfaceCell(double* ydata, UserData data, double delta_t)
     const double area = calc_area(Rint, &data->metric);
     data->dropletMass -= mdot_area * area * delta_t;
 
-    printf("mdot = %.6e  dM = %.6e kg\n",
-           mdot_area, mdot_area * area * delta_t);
-//    printf("interface temperature = %.6e K\n", Tint);
+    const int nIter = (iter == maxIter) ? maxIter : iter + 1;
+    printf("mdot = %.6e  dM = %.6e kg  iter = %d  dT = %.4e K\n",
+           mdot_area, mdot_area * area * delta_t, nIter, dT);
 }

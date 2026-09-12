@@ -218,7 +218,13 @@ int main(){
 //            fun(tNow, y, ydot, data);
             //Compute spatial coordinates
 //            getR(y, data);
-            getRNew(ydata,data) ;
+            try {
+                getRNew(ydata,data) ;
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[main] getRNew exception: %s — aborting\n", e.what());
+                freeAtLast(memCVODE,&y,&ydot,&atolv,&constraints,data);
+                return(-1);
+            }
             clock_t start_1,end_1;
             start_1 = clock();
 
